@@ -1,6 +1,6 @@
 CONFIG = {
     "random_state": 42,
-    "run_profile": "Balanced Demo",
+    "run_profile": "Standard",
     "entity_counts": {
         "customers": 6500,
         "accounts": 8000,
@@ -28,9 +28,9 @@ CONFIG = {
     "sequence_batch_size": 128,
     "enable_tensorflow_sequences": False,
     "enable_shap": False,
-    "graph_sample_size": 8000,
-    "ring_sample_size": 3000,
-    "max_rings": 25,
+    "graph_sample_size": 2400,
+    "ring_sample_size": 1200,
+    "max_rings": 12,
     "classifier_model": "Random Forest",
     "challenger_model": "Logistic Regression",
     "classifier_estimators": 220,
@@ -40,8 +40,8 @@ CONFIG = {
     "alert_daily_capacity": 500,
     "review_daily_capacity": 1000,
     "demo_profiles": {
-        "Executive Demo": {
-            "run_profile": "Executive Demo",
+        "Fast": {
+            "run_profile": "Fast",
             "entity_counts": {
                 "customers": 3200,
                 "accounts": 4100,
@@ -52,15 +52,15 @@ CONFIG = {
             },
             "records_per_category_min": 320,
             "records_per_category_max": 460,
-            "graph_sample_size": 2800,
-            "ring_sample_size": 1400,
-            "max_rings": 15,
+            "graph_sample_size": 1800,
+            "ring_sample_size": 900,
+            "max_rings": 8,
             "classifier_estimators": 160,
             "classifier_max_depth": 10,
             "classifier_min_samples_leaf": 3,
         },
-        "Balanced Demo": {
-            "run_profile": "Balanced Demo",
+        "Standard": {
+            "run_profile": "Standard",
             "entity_counts": {
                 "customers": 6500,
                 "accounts": 8000,
@@ -71,15 +71,15 @@ CONFIG = {
             },
             "records_per_category_min": 800,
             "records_per_category_max": 1100,
-            "graph_sample_size": 8000,
-            "ring_sample_size": 3000,
-            "max_rings": 25,
+            "graph_sample_size": 2400,
+            "ring_sample_size": 1200,
+            "max_rings": 12,
             "classifier_estimators": 220,
             "classifier_max_depth": 12,
             "classifier_min_samples_leaf": 4,
         },
-        "Boardroom Deep Dive": {
-            "run_profile": "Boardroom Deep Dive",
+        "Extended": {
+            "run_profile": "Extended",
             "entity_counts": {
                 "customers": 9000,
                 "accounts": 11500,
@@ -90,9 +90,9 @@ CONFIG = {
             },
             "records_per_category_min": 1200,
             "records_per_category_max": 1600,
-            "graph_sample_size": 12000,
-            "ring_sample_size": 4500,
-            "max_rings": 40,
+            "graph_sample_size": 3200,
+            "ring_sample_size": 1600,
+            "max_rings": 16,
             "classifier_estimators": 260,
             "classifier_max_depth": 14,
             "classifier_min_samples_leaf": 4,

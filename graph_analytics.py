@@ -60,8 +60,8 @@ class GraphAnalytics:
             return df.copy(), pd.DataFrame()
 
         degree_cent = nx.degree_centrality(graph)
-        clustering = nx.clustering(graph) if graph.number_of_nodes() <= 5000 else {}
-        pagerank = nx.pagerank(graph, alpha=0.85, max_iter=100) if graph.number_of_nodes() <= 6000 else {}
+        clustering = nx.clustering(graph) if graph.number_of_nodes() <= 2200 else {}
+        pagerank = nx.pagerank(graph, alpha=0.85, max_iter=60) if graph.number_of_nodes() <= 1800 else {}
 
         community_map = {}
         cycle_nodes = set()
@@ -118,14 +118,13 @@ class GraphAnalytics:
         graph = nx.Graph()
         edge_amount = {}
 
-        for _, row in sample.iterrows():
-            account_id = row.get("account_id")
-            counterparty_id = row.get("counterparty_id")
+        ring_sample = sample[["account_id", "counterparty_id", "amount"]].copy()
+        for account_id, counterparty_id, amount_raw in ring_sample.itertuples(index=False, name=None):
             if pd.isna(account_id) or pd.isna(counterparty_id):
                 continue
             u = str(account_id)
             v = str(counterparty_id)
-            amount = float(row.get("amount", 0) or 0)
+            amount = float(amount_raw or 0)
             graph.add_edge(u, v, weight=graph.get_edge_data(u, v, default={}).get("weight", 0.0) + amount)
             edge_amount[(u, v)] = edge_amount.get((u, v), 0.0) + amount
 
@@ -168,9 +167,55 @@ class GraphAnalytics:
                 }
             )
 
-        ring_df = pd.DataFrame(candidates).sort_values(
-            ["ring_risk_score", "ring_member_count"], ascending=[False, False]
-        ).head(max_rings)
+        if not candidates:
+            fallback_groups = (
+                sample.groupby("counterparty_id")
+                .agg(
+                    ring_member_count=("account_id", "nunique"),
+                    ring_total_amount=("amount", "sum"),
+                    ring_edge_count=("account_id", "count"),
+                )
+                .reset_index()
+            )
+            fallback_groups = fallback_groups[fallback_groups["ring_member_count"] >= 3].sort_values(
+                ["ring_member_count", "ring_total_amount"], ascending=[False, False]
+            ).head(max_rings)
+
+            for _, row in fallback_groups.iterrows():
+                cp_id = row["counterparty_id"]
+                members = sorted(set(sample.loc[sample["counterparty_id"] == cp_id, "account_id"].astype(str).head(10))) + [str(cp_id)]
+                density = min(1.0, row["ring_edge_count"] / max(row["ring_member_count"], 1))
+                risk_score = float(min(0.92, 0.30 + min(0.32, row["ring_member_count"] / 18.0) + min(0.25, np.log1p(row["ring_total_amount"]) / 22.0)))
+                candidates.append(
+                    {
+                        "ring_id": f"HUB_{len(candidates) + 1:03d}",
+                        "ring_member_count": int(row["ring_member_count"] + 1),
+                        "ring_edge_count": int(row["ring_edge_count"]),
+                        "ring_density": round(float(density), 4),
+                        "ring_total_amount": round(float(row["ring_total_amount"]), 2),
+                        "ring_risk_score": round(risk_score, 4),
+                        "ring_path_signature": "->".join(members[:6]),
+                        "ring_members": members,
+                    }
+                )
+
+        if candidates:
+            ring_df = pd.DataFrame(candidates).sort_values(
+                ["ring_risk_score", "ring_member_count"], ascending=[False, False]
+            ).head(max_rings)
+        else:
+            ring_df = pd.DataFrame(
+                columns=[
+                    "ring_id",
+                    "ring_member_count",
+                    "ring_edge_count",
+                    "ring_density",
+                    "ring_total_amount",
+                    "ring_risk_score",
+                    "ring_path_signature",
+                    "ring_members",
+                ]
+            )
 
         out = df.copy()
         out["ring_count"] = 0

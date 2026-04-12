@@ -6,17 +6,22 @@ import pandas as pd
 import time
 import json
 import os
+from pathlib import Path
 import plotly.express as px
 import plotly.graph_objects as go
 
 from config import CONFIG
 
 st.set_page_config(
-    page_title="PwC Mule Detection Platform",
+    page_title="PwC Mule Model Studio",
     page_icon="P",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+APP_NAME = "Mule Model Studio"
+APP_DESCRIPTION = "Synthetic data generation, graph analytics, typology modelling, and alert packaging for mule-risk analysis."
+PWC_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "pwc-logo.svg"
 
 PWC_COLORS = {
     "primary": "#D04A02",
@@ -46,6 +51,35 @@ PWC_COLORS = {
     "accent_gold": "#FFB600",
     "accent_teal": "#00A3A1",
     "accent_rose": "#E0457B",
+}
+
+UI_THEMES = {
+    "Light": {
+        "canvas": "#F6F0E8",
+        "surface": "#FFFDFC",
+        "surface_soft": "#F9F4EE",
+        "sidebar": "#241B16",
+        "sidebar_soft": "#2F241D",
+        "text": "#1E1A17",
+        "muted": "#6C645C",
+        "line": "#E5D8CB",
+        "shadow": "rgba(70, 45, 25, 0.10)",
+        "chip": "rgba(208, 74, 2, 0.10)",
+        "graph_edge": "rgba(156, 130, 109, 0.35)",
+    },
+    "Dark": {
+        "canvas": "#0F1115",
+        "surface": "#171B22",
+        "surface_soft": "#1D222B",
+        "sidebar": "#0B0E13",
+        "sidebar_soft": "#131821",
+        "text": "#F3F4F6",
+        "muted": "#B7BDC7",
+        "line": "#2B3440",
+        "shadow": "rgba(0, 0, 0, 0.35)",
+        "chip": "rgba(208, 74, 2, 0.16)",
+        "graph_edge": "rgba(111, 122, 140, 0.35)",
+    },
 }
 
 ENTERPRISE_CSS = f"""
@@ -796,6 +830,197 @@ button[kind="secondary"] {{
 
 st.markdown(CLIENT_DEMO_CSS, unsafe_allow_html=True)
 
+
+def current_theme():
+    return UI_THEMES.get(st.session_state.get("ui_theme", "Light"), UI_THEMES["Light"])
+
+
+def inject_theme_css():
+    theme = current_theme()
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background:
+                radial-gradient(circle at top right, rgba(208, 74, 2, 0.10), transparent 24%),
+                linear-gradient(180deg, {theme["canvas"]} 0%, {theme["surface_soft"]} 100%) !important;
+            color: {theme["text"]} !important;
+        }}
+
+        header[data-testid="stHeader"] {{
+            background: {theme["surface"]}DD !important;
+            border-bottom: 1px solid {theme["line"]} !important;
+        }}
+
+        div[data-testid="stSidebar"] {{
+            background: linear-gradient(180deg, {theme["sidebar"]} 0%, {theme["sidebar_soft"]} 100%) !important;
+        }}
+
+        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        div[data-testid="stSidebar"] label,
+        div[data-testid="stSidebar"] .stRadio label,
+        div[data-testid="stSidebar"] .stCaption {{
+            color: #ECE3DB !important;
+        }}
+
+        .hero-shell, .overview-panel, .kpi-card, .data-card, .graph-shell, .stat-chip {{
+            background: {theme["surface"]} !important;
+            color: {theme["text"]} !important;
+            border-color: {theme["line"]} !important;
+            box-shadow: 0 18px 40px {theme["shadow"]} !important;
+        }}
+
+        .hero-shell {{
+            border: 1px solid {theme["line"]};
+            border-radius: 28px;
+            padding: 1.8rem 1.9rem 1.5rem 1.9rem;
+            margin-bottom: 1rem;
+        }}
+
+        .hero-kicker {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.38rem 0.75rem;
+            border-radius: 999px;
+            background: {theme["chip"]};
+            color: {PWC_COLORS["primary"]};
+            font-size: 0.72rem;
+            font-weight: 700;
+            margin-bottom: 0.8rem;
+        }}
+
+        .hero-title {{
+            margin: 0;
+            color: {theme["text"]};
+            font-size: 2.2rem;
+            line-height: 1.05;
+            text-align: left;
+        }}
+
+        .hero-subtitle {{
+            margin: 0.75rem 0 0 0;
+            color: {theme["muted"]};
+            font-size: 0.98rem;
+            max-width: 900px;
+            text-align: left;
+        }}
+
+        .hero-stage {{
+            margin-top: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }}
+
+        .hero-stage span {{
+            color: {theme["muted"]};
+            font-size: 0.84rem;
+            font-weight: 600;
+        }}
+
+        .hero-progress {{
+            flex: 1;
+            min-width: 220px;
+            height: 8px;
+            background: {theme["surface_soft"]};
+            border-radius: 999px;
+            overflow: hidden;
+            border: 1px solid {theme["line"]};
+        }}
+
+        .hero-progress > div {{
+            height: 100%;
+            background: linear-gradient(90deg, {PWC_COLORS["primary"]}, {PWC_COLORS["accent_gold"]});
+            border-radius: 999px;
+        }}
+
+        .stat-chip {{
+            border: 1px solid {theme["line"]};
+            border-radius: 18px;
+            padding: 0.95rem 1rem;
+            min-height: 88px;
+        }}
+
+        .stat-chip .label {{
+            color: {theme["muted"]};
+            font-size: 0.74rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 700;
+        }}
+
+        .stat-chip .value {{
+            color: {theme["text"]};
+            font-size: 1.35rem;
+            font-weight: 800;
+            margin-top: 0.35rem;
+        }}
+
+        .stat-chip .sub {{
+            color: {theme["muted"]};
+            font-size: 0.74rem;
+            margin-top: 0.18rem;
+        }}
+
+        .stTabs [data-baseweb="tab-list"] {{
+            background: {theme["surface"]} !important;
+            border: 1px solid {theme["line"]} !important;
+        }}
+
+        .stTabs [data-baseweb="tab"] {{
+            color: {theme["muted"]} !important;
+        }}
+
+        .stTabs [aria-selected="true"] {{
+            background: {PWC_COLORS["primary"]} !important;
+            color: #FFFFFF !important;
+        }}
+
+        button[kind="primary"] {{
+            background: linear-gradient(135deg, {PWC_COLORS["primary"]}, {PWC_COLORS["primary_dark"]}) !important;
+            color: #FFFFFF !important;
+        }}
+
+        button[kind="secondary"] {{
+            background: {theme["surface"]} !important;
+            border: 1px solid {theme["line"]} !important;
+            color: {theme["text"]} !important;
+        }}
+
+        .section-title, .kpi-card .kpi-value, .data-card h3, .table-row .name {{
+            color: {theme["text"]} !important;
+        }}
+
+        .kpi-card .kpi-label, .kpi-card .kpi-sub, .table-row .info {{
+            color: {theme["muted"]} !important;
+        }}
+
+        .progress-steps, .table-row:hover {{
+            background: {theme["surface_soft"]} !important;
+            border-color: {theme["line"]} !important;
+        }}
+
+        .stSelectbox > div > div,
+        .stNumberInput > div > div > input,
+        .stDateInput > div > div > input,
+        .stTextInput > div > div > input {{
+            background: {theme["surface"]} !important;
+            color: {theme["text"]} !important;
+            border-color: {theme["line"]} !important;
+        }}
+
+        .stRadio [role="radiogroup"] label {{
+            border-radius: 12px;
+            padding: 0.35rem 0.5rem;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
 DARK_PLOTLY_TEMPLATE = dict(
     layout=dict(
         paper_bgcolor="#FFFDFC",
@@ -812,7 +1037,17 @@ DARK_PLOTLY_TEMPLATE = dict(
 
 
 def apply_dark_theme(fig):
-    fig.update_layout(**DARK_PLOTLY_TEMPLATE["layout"])
+    theme = current_theme()
+    fig.update_layout(
+        paper_bgcolor=theme["surface"],
+        plot_bgcolor=theme["surface"],
+        font=dict(family="Inter", color=theme["text"], size=12),
+        title_font=dict(size=15, color=theme["text"]),
+        xaxis=dict(gridcolor=theme["line"], zerolinecolor=theme["line"]),
+        yaxis=dict(gridcolor=theme["line"], zerolinecolor=theme["line"]),
+        colorway=DARK_PLOTLY_TEMPLATE["layout"]["colorway"],
+        margin=DARK_PLOTLY_TEMPLATE["layout"]["margin"],
+    )
     return fig
 
 
@@ -830,56 +1065,49 @@ def get_pipeline_step_map():
 
 
 def render_workspace_ribbon():
-    step_map = get_pipeline_step_map()
-    completed = sum(done for _, done in step_map)
-    profile = st.session_state.get("demo_profile", CONFIG.get("run_profile", "Balanced Demo"))
-    st.markdown(
-        f"""
-        <div class="workspace-ribbon">
-            <div class="workspace-chip">FCC Workbench</div>
-            <div class="workspace-chip">Technical Workspace</div>
-            <div class="workspace-chip active">{profile}</div>
-            <div class="workspace-chip">{completed}/8 stages ready</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    return None
 
 
 def render_top_bar(title, subtitle, stats=None):
-    stats_html = ""
-    if stats:
-        for s in stats:
-            stats_html += f"""
-            <div class="top-bar-stat">
-                <div class="value">{s['value']}</div>
-                <div class="label">{s['label']}</div>
-            </div>
-            """
-    render_workspace_ribbon()
-    readiness_class = "ready" if st.session_state.alert_output is not None else "active" if st.session_state.feature_df is not None else "pending"
+    completed = sum(done for _, done in get_pipeline_step_map())
+    progress_pct = completed / 8
     readiness_label = (
-        "Client demo ready"
+        "Pipeline complete"
         if st.session_state.alert_output is not None
         else "Pipeline in progress"
         if st.session_state.feature_df is not None
-        else "Awaiting data generation"
+        else "Ready to run"
     )
     st.markdown(
         f"""
-        <div class="top-bar">
-            <div class="top-bar-left">
-                <div class="status-pill {readiness_class}">{readiness_label}</div>
-                <h1>{title}</h1>
-                <p>{subtitle}</p>
-            </div>
-            <div class="top-bar-right">
-                {stats_html}
+        <div class="hero-shell">
+            <div class="hero-kicker">{readiness_label}</div>
+            <h1 class="hero-title">{title}</h1>
+            <p class="hero-subtitle">{subtitle}</p>
+            <div class="hero-stage">
+                <span>{completed}/8 stages complete</span>
+                <div class="hero-progress"><div style="width:{progress_pct * 100:.0f}%;"></div></div>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+    if stats:
+        stat_cols = st.columns(len(stats))
+        for col, stat in zip(stat_cols, stats):
+            with col:
+                sub = stat.get("sub", "")
+                st.markdown(
+                    f"""
+                    <div class="stat-chip">
+                        <div class="label">{stat['label']}</div>
+                        <div class="value">{stat['value']}</div>
+                        <div class="sub">{sub}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
 
 def render_kpi(icon_class, label, value, sub="", color="orange"):
@@ -913,6 +1141,7 @@ def render_progress_steps(current, total=8):
 
 
 def render_network_graph(df, ring_df=None):
+    theme = current_theme()
     edges = []
     nodes_set = set()
 
@@ -947,14 +1176,14 @@ def render_network_graph(df, ring_df=None):
     rings_json = json.dumps(ring_paths[:10])
 
     graph_html = f"""
-    <div id="network-graph" style="width: 100%; height: 550px; background: #FFFDFC; border-radius: 18px; position: relative; border: 1px solid #E5D8CB;">
+    <div id="network-graph" style="width: 100%; height: 550px; background: {theme["surface"]}; border-radius: 18px; position: relative; border: 1px solid {theme["line"]};">
         <canvas id="graphCanvas" style="width: 100%; height: 100%;"></canvas>
-        <div id="graph-legend" style="position: absolute; top: 12px; right: 12px; background: rgba(255,253,252,0.94); padding: 10px 14px; border-radius: 12px; border: 1px solid #E5D8CB; font-size: 11px; color: #6C645C; box-shadow: 0 10px 18px rgba(70,45,25,0.08);">
+        <div id="graph-legend" style="position: absolute; top: 12px; right: 12px; background: {theme["surface"]}; padding: 10px 14px; border-radius: 12px; border: 1px solid {theme["line"]}; font-size: 11px; color: {theme["muted"]}; box-shadow: 0 10px 18px {theme["shadow"]};">
             <div style="margin-bottom: 4px;"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#D04A02;margin-right:6px;"></span>Node</div>
             <div style="margin-bottom: 4px;"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#00A3A1;margin-right:6px;"></span>Ring</div>
             <div><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#E0457B;margin-right:6px;"></span>Ring Path</div>
         </div>
-        <div id="graph-info" style="position: absolute; bottom: 12px; left: 12px; background: rgba(255,253,252,0.94); padding: 8px 12px; border-radius: 12px; border: 1px solid #E5D8CB; font-size: 11px; color: #6C645C; box-shadow: 0 10px 18px rgba(70,45,25,0.08);">
+        <div id="graph-info" style="position: absolute; bottom: 12px; left: 12px; background: {theme["surface"]}; padding: 8px 12px; border-radius: 12px; border: 1px solid {theme["line"]}; font-size: 11px; color: {theme["muted"]}; box-shadow: 0 10px 18px {theme["shadow"]};">
             Nodes: {len(nodes_list)} | Edges: {len(edges_list)} | Rings: {len(ring_paths)}
         </div>
     </div>
@@ -1057,7 +1286,7 @@ def render_network_graph(df, ring_df=None):
                 ctx.beginPath();
                 ctx.moveTo(a.x, a.y);
                 ctx.lineTo(b.x, b.y);
-                ctx.strokeStyle = 'rgba(156, 130, 109, 0.35)';
+                ctx.strokeStyle = '{theme["graph_edge"]}';
                 ctx.lineWidth = 0.8;
                 ctx.stroke();
             }});
@@ -1244,7 +1473,7 @@ def run_demo_pipeline():
     alert_output, threshold_tbl, channel_thresholds_tbl, class_thresholds_tbl, _enriched_alert_df, threshold_opt = timed_step(
         "Alerts",
         100,
-        "Packaging client-ready alerts...",
+        "Packaging explainable alerts...",
         lambda: alert_engine.model8_alert_pack(test_df, test_prob, model6_artifacts),
     )
 
@@ -1294,16 +1523,16 @@ def run_demo_pipeline():
 
 def render_sidebar_v2():
     nav_items = [
-        {"label": "Executive Summary", "key": "Overview", "step": 0, "code": "00"},
-        {"label": "Data Generation", "key": "1. Data Generation", "step": 1, "code": "01"},
-        {"label": "Entity Resolution", "key": "2. Entity Resolution", "step": 2, "code": "02"},
-        {"label": "Feature Engineering", "key": "3. Feature Engineering", "step": 3, "code": "03"},
-        {"label": "Graph Analytics", "key": "4. Graph Analytics", "step": 4, "code": "04"},
-        {"label": "Model Training", "key": "5. Model Training", "step": 5, "code": "05"},
-        {"label": "Alert Engine", "key": "6. Alert Engine", "step": 6, "code": "06"},
-        {"label": "Feedback Loop", "key": "7. Feedback Loop", "step": 7, "code": "07"},
-        {"label": "Export", "key": "8. Export", "step": 8, "code": "08"},
-        {"label": "Monitoring", "key": "Monitoring", "step": 9, "code": "09"},
+        {"label": "Overview", "icon": "🏠", "key": "Overview", "step": 0},
+        {"label": "Data Generation", "icon": "🗂️", "key": "1. Data Generation", "step": 1},
+        {"label": "Entity Resolution", "icon": "🧩", "key": "2. Entity Resolution", "step": 2},
+        {"label": "Feature Engineering", "icon": "🛠️", "key": "3. Feature Engineering", "step": 3},
+        {"label": "Graph Analytics", "icon": "🕸️", "key": "4. Graph Analytics", "step": 4},
+        {"label": "Model Training", "icon": "🤖", "key": "5. Model Training", "step": 5},
+        {"label": "Alert Engine", "icon": "🚨", "key": "6. Alert Engine", "step": 6},
+        {"label": "Feedback Loop", "icon": "🔁", "key": "7. Feedback Loop", "step": 7},
+        {"label": "Export", "icon": "📦", "key": "8. Export", "step": 8},
+        {"label": "Monitoring", "icon": "📈", "key": "Monitoring", "step": 9},
     ]
 
     step_done = {
@@ -1318,18 +1547,13 @@ def render_sidebar_v2():
         9: False,
     }
 
+    if PWC_LOGO_PATH.exists():
+        st.image(str(PWC_LOGO_PATH), width=96)
     st.markdown(
         f"""
-        <div style="padding: 1.25rem 1rem 0.9rem 1rem; border-bottom: 1px solid rgba(255,255,255,0.08); margin-bottom: 1rem;">
-            <div style="display:flex; align-items:center; gap:0.7rem;">
-                <div style="width:40px; height:40px; background:{PWC_COLORS["primary"]}; border-radius:12px; display:flex; align-items:center; justify-content:center; box-shadow:0 12px 24px rgba(208,74,2,0.30);">
-                    <span style="color:white; font-weight:800; font-size:1rem;">P</span>
-                </div>
-                <div>
-                    <div style="font-size:0.95rem; font-weight:700; color:#FFF5EF;">PwC Mule Detection</div>
-                    <div style="font-size:0.72rem; color:#D8C6B7;">Client Demo Workspace</div>
-                </div>
-            </div>
+        <div style="padding:0.15rem 0 0.75rem 0;">
+            <div style="font-size:1.02rem; font-weight:800; color:#FFF5EF;">PwC {APP_NAME}</div>
+            <div style="font-size:0.76rem; line-height:1.45; color:#D8C6B7; margin-top:0.3rem;">{APP_DESCRIPTION}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1337,13 +1561,13 @@ def render_sidebar_v2():
 
     completed = sum(step_done[i] for i in range(1, 9))
     pct = completed / 8
-    st.caption(f"Profile: {st.session_state.demo_profile}")
+    st.caption(f"Run profile: {st.session_state.demo_profile}")
     st.markdown(
         f"""
         <div style="padding:0 0.35rem 0.5rem 0.35rem; margin-bottom:0.8rem;">
             <div style="display:flex; justify-content:space-between; margin-bottom:0.3rem;">
-                <span style="font-size:0.72rem; color:#E9DDD3;">Readiness</span>
-                <span style="font-size:0.72rem; color:#FFD2BA;">{completed}/8</span>
+                <span style="font-size:0.72rem; color:#E9DDD3;">Stages</span>
+                <span style="font-size:0.72rem; color:#FFD2BA;">{completed}/8 complete</span>
             </div>
             <div style="height:6px; background:rgba(255,255,255,0.08); border-radius:999px; overflow:hidden;">
                 <div style="height:100%; width:{pct*100}%; background:linear-gradient(90deg, {PWC_COLORS["primary"]}, {PWC_COLORS["accent_gold"]}); border-radius:999px;"></div>
@@ -1353,15 +1577,33 @@ def render_sidebar_v2():
         unsafe_allow_html=True,
     )
 
+    with st.expander("Workspace Settings", expanded=True):
+        selected_theme = st.radio("Theme", ["Light", "Dark"], index=0 if st.session_state.ui_theme == "Light" else 1, horizontal=True)
+        selected_profile = st.selectbox("Run profile", list(CONFIG.get("demo_profiles", {}).keys()), index=list(CONFIG.get("demo_profiles", {}).keys()).index(st.session_state.demo_profile))
+        if st.button("Apply Settings", use_container_width=True):
+            st.session_state.ui_theme = selected_theme
+            apply_demo_profile(selected_profile)
+            st.rerun()
+
     for item in nav_items:
-        is_active = st.session_state.page == item["key"]
-        is_ready = step_done.get(item["step"], False)
-        label = f"{item['code']}  {item['label']}"
-        if is_ready and item["step"] not in (0, 9):
+        ready = item["step"] == 0 or step_done.get(item["step"], False)
+        label = f"{item['icon']}  {item['label']}"
+        if ready and item["step"] not in (0, 9):
             label += "  READY"
-        if st.button(label, key=f"nav2_{item['key']}", use_container_width=True, type="primary" if is_active else "secondary"):
+        if st.button(
+            label,
+            key=f"nav_icon_{item['key']}",
+            use_container_width=True,
+            type="primary" if st.session_state.page == item["key"] else "secondary",
+        ):
             st.session_state.page = item["key"]
             st.rerun()
+
+    with st.expander("Stage Status", expanded=False):
+        for item in nav_items[1:9]:
+            done = step_done.get(item["step"], False)
+            status = "Ready" if done else "Pending"
+            st.markdown(f"`{item['label']}`  {status}")
 
     st.markdown("---")
     if st.button("Reset Workspace", use_container_width=True):
@@ -1371,15 +1613,15 @@ def render_sidebar_v2():
 def page_overview():
     metrics = collect_overview_metrics()
     stats = [
-        {"value": st.session_state.demo_profile, "label": "Profile"},
-        {"value": f"{metrics['events']:,}" if metrics["events"] else "Not run", "label": "Events"},
-        {"value": f"{metrics['alerts']:,}" if metrics["alerts"] else "Pending", "label": "Alerts"},
-        {"value": f"{metrics['macro_f1']:.3f}" if metrics["macro_f1"] is not None else "Pending", "label": "Macro F1"},
+        {"value": st.session_state.demo_profile, "label": "Run Profile", "sub": "Execution scale"},
+        {"value": f"{metrics['events']:,}" if metrics["events"] else "Not run", "label": "Events", "sub": "Unified activity records"},
+        {"value": f"{metrics['alerts']:,}" if metrics["alerts"] else "Pending", "label": "Alerts", "sub": "Scored and packaged"},
+        {"value": f"{metrics['macro_f1']:.3f}" if metrics["macro_f1"] is not None else "Pending", "label": "Macro F1", "sub": "Current model quality"},
     ]
 
     render_top_bar(
-        "Executive Summary",
-        "Client-ready walkthrough of the mule detection journey, from synthetic banking activity through graph intelligence, model scoring, and alert packaging.",
+        APP_NAME,
+        "A streamlined workspace for generating synthetic banking activity, building graph and sequence intelligence, training mule typology models, and packaging explainable alerts.",
         stats,
     )
 
@@ -1392,8 +1634,8 @@ def page_overview():
         st.markdown(
             """
             <div class="overview-panel">
-                <h3>What this demo shows</h3>
-                <p>One guided run generates realistic multi-channel banking events, resolves customer entities, computes graph and sequence intelligence, trains a multiclass typology model, and packages prioritized alerts with reasons your stakeholders can read.</p>
+                <h3>What this workspace does</h3>
+                <p>One run generates realistic multi-channel banking events, resolves customer entities, computes graph and sequence intelligence, trains a multiclass typology model, and packages prioritized alerts with readable reasons.</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1411,7 +1653,7 @@ def page_overview():
         )
 
     with col_right:
-        selected_profile = st.selectbox("Demo profile", profile_names, index=profile_index)
+        selected_profile = st.selectbox("Run profile", profile_names, index=profile_index)
         seed = st.number_input("Seed", value=int(CONFIG["random_state"]), min_value=1, max_value=99999)
         action_col1, action_col2 = st.columns(2)
         with action_col1:
@@ -1420,14 +1662,14 @@ def page_overview():
                 CONFIG["random_state"] = int(seed)
                 st.rerun()
         with action_col2:
-            if st.button("Run Client Demo", type="primary", use_container_width=True):
+            if st.button("Run Pipeline", type="primary", use_container_width=True):
                 apply_demo_profile(selected_profile)
                 CONFIG["random_state"] = int(seed)
                 run_demo_pipeline()
                 st.session_state.page = "Overview"
                 st.rerun()
 
-    render_section("Demo Snapshot", "dashboard")
+    render_section("Workspace Snapshot", "dashboard")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         render_kpi("timeline", "Events", f"{metrics['events']:,}" if metrics["events"] else "Pending", "Unified customer activity", "orange")
@@ -1446,7 +1688,7 @@ def page_overview():
     with details_col1:
         render_section("Latest Run Story", "auto_awesome")
         if st.session_state.alert_output is None:
-            st.info("Run the client demo to populate the end-to-end story, metrics, and drill-down pages.")
+            st.info("Run the pipeline to populate the workspace, metrics, and drill-down pages.")
         else:
             alert_preview = st.session_state.alert_output.sort_values("final_mule_score", ascending=False).head(15)
             st.dataframe(alert_preview, use_container_width=True, height=360)
@@ -1472,7 +1714,8 @@ def page_overview():
 def init_session_state():
     defaults = {
         "page": "Overview",
-        "demo_profile": CONFIG.get("run_profile", "Balanced Demo"),
+        "demo_profile": CONFIG.get("run_profile", "Standard"),
+        "ui_theme": "Light",
         "current_step": 0,
         "raw_tables": None,
         "txn_tables": None,
@@ -2538,6 +2781,7 @@ def page_monitoring():
 
 def main():
     init_session_state()
+    inject_theme_css()
 
     with st.sidebar:
         render_sidebar_v2()

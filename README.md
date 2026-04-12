@@ -1,49 +1,39 @@
-# Mule Detection Client Demo
+# PwC Mule Model Studio
 
-Client-ready Streamlit demo for synthetic mule-account detection across:
+Streamlit workspace for synthetic mule-account analysis across:
 
 - data generation
 - entity resolution
 - feature engineering
 - graph analytics and ring detection
-- champion/challenger model training
-- alert packaging and feedback loop
+- champion and challenger model training
+- alert packaging and feedback
 
 ## Local Run
-
-Create or activate the included virtual environment, then run:
 
 ```bash
 streamlit run app.py
 ```
 
-For the pipeline-only smoke test:
+## Pipeline Smoke Test
 
 ```bash
 python main_pipeline.py
 ```
 
-## Recommended Demo Flow
+## Workflow
 
-1. Open the app landing page.
-2. Select a demo profile.
-3. Click `Run Client Demo`.
-4. Walk through `Executive Summary`, `Graph Analytics`, `Model Training`, and `Alert Engine`.
+1. Choose a run profile.
+2. Click `Run Pipeline`.
+3. Review the overview, graph analytics, model training, and alert pages.
 
 ## Deployment
 
-This repo is prepared for Streamlit Community Cloud:
-
-- `app.py` is the entrypoint.
-- `requirements.txt` contains the lean deployment dependencies.
-- `.streamlit/config.toml` sets the app theme.
-
-After pushing to GitHub, point Streamlit Community Cloud at this repo and set:
-
-- Main file path: `app.py`
-- Python dependencies: `requirements.txt`
+- Entry point: `app.py`
+- Dependencies: `requirements.txt`
+- Theme config: `.streamlit/config.toml`
 
 ## Notes
 
-- The app defaults to smaller demo-scale synthetic data so it finishes fast enough for a live walkthrough.
-- TensorFlow and SHAP are treated as optional extras and are disabled by default for simpler deployment.
+- The default profiles use smaller synthetic samples so the graph and model steps stay responsive.
+- TensorFlow and SHAP are disabled by default to keep deployment lightweight and stable.
