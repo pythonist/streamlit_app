@@ -1977,6 +1977,274 @@ def collect_overview_metrics():
     return metrics
 
 
+def build_inference_splits(df):
+    from multiclass_model import MulticlassModel
+
+    modeler = MulticlassModel()
+    train_df, valid_df, test_df = modeler.split_time_based(df, CONFIG["train_end"], CONFIG["valid_end"])
+
+    if min(len(train_df), len(valid_df), len(test_df)) == 0:
+        ordered = df.sort_values("event_ts").reset_index(drop=True).copy()
+        total = len(ordered)
+        if total < 3:
+            return ordered.copy(), ordered.head(0).copy(), ordered.copy()
+        train_cut = max(1, int(total * 0.60))
+        valid_cut = max(train_cut + 1, int(total * 0.80))
+        if valid_cut >= total:
+            valid_cut = total - 1
+        train_df = ordered.iloc[:train_cut].copy()
+        valid_df = ordered.iloc[train_cut:valid_cut].copy()
+        test_df = ordered.iloc[valid_cut:].copy()
+    return train_df, valid_df, test_df
+
+
+def generate_fresh_inference_batch(seed):
+    import random
+
+    from data_ingestion import DataIngestion
+    from entity_resolution import EntityResolution
+    from feature_engineering import FeatureEngineering
+    from graph_analytics import GraphAnalytics
+    from sequence_models import SequenceModels
+
+    original_seed = int(CONFIG["random_state"])
+    timings = {}
+
+    def timed(label, callback):
+        start = time.time()
+        result = callback()
+        timings[label] = round(time.time() - start, 2)
+        return result
+
+    try:
+        CONFIG["random_state"] = int(seed)
+        np.random.seed(int(seed))
+        random.seed(int(seed))
+
+        ingestion = DataIngestion()
+        raw_tables = timed("Raw Tables", ingestion.generate_raw_tables)
+        txn_tables = timed("Txn Tables", lambda: ingestion.generate_transaction_tables(raw_tables))
+
+        entity = EntityResolution()
+        entity_views = timed("Entity Views", lambda: entity.build_entity_views(raw_tables))
+        events = timed("Unified Events", lambda: entity.build_unified_events(txn_tables))
+        single_view = timed("Single View", lambda: entity.build_single_view(events, entity_views))
+
+        feat = FeatureEngineering()
+        clean_df = timed("EDA", lambda: feat.run_eda_and_imputation(single_view))
+        feature_df = timed("Features", lambda: feat.feature_engineering(clean_df))
+
+        graph = GraphAnalytics()
+        graph_feature_df, graph_features = timed("Graph", lambda: graph.model1_graph_analytics(feature_df))
+        graph_feature_df, ring_df = timed("Rings", lambda: graph.model2_ring_detection(graph_feature_df))
+
+        train_df, valid_df, test_df = timed("Split", lambda: build_inference_splits(graph_feature_df))
+
+        seq = SequenceModels()
+        model3, train_df, valid_df, test_df = timed("Hazard", lambda: seq.model3_hazard(train_df, valid_df, test_df))
+        model4, train_df, valid_df, test_df = timed("HMM", lambda: seq.model4_hmm(train_df, valid_df, test_df))
+        model5_outputs = timed("Sequence", lambda: seq.model5_lstm_and_transformer(train_df, valid_df, test_df))
+
+        return {
+            "seed": int(seed),
+            "profile": st.session_state.demo_profile,
+            "generated_at": pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+            "timings": timings,
+            "ring_df": ring_df,
+            "train_df": train_df,
+            "valid_df": valid_df,
+            "test_df": test_df,
+            "feature_count": int(feature_df.shape[1]),
+            "ring_count": int(len(ring_df)) if ring_df is not None else 0,
+            "sequence_model_type": model5_outputs.get("sequence_model_type", "unknown") if isinstance(model5_outputs, dict) else "unknown",
+        }
+    finally:
+        CONFIG["random_state"] = original_seed
+        np.random.seed(original_seed)
+        random.seed(original_seed)
+
+
+def get_active_model_bundle():
+    if st.session_state.model6_artifacts is not None and st.session_state.feature_cols is not None:
+        artifacts = st.session_state.model6_artifacts
+        return {
+            "source": "Current workspace",
+            "model_label": CONFIG.get("classifier_model", "Random Forest"),
+            "preprocessor": artifacts.preprocessor,
+            "label_encoder": artifacts.label_encoder,
+            "base_model": artifacts.base_model,
+            "calibrated_model": artifacts.calibrated_model,
+            "feature_names": artifacts.feature_names,
+            "feature_cols": list(st.session_state.feature_cols),
+        }
+
+    if os.path.exists("best_model.pkl"):
+        with open("best_model.pkl", "rb") as model_file:
+            saved = pickle.load(model_file)
+        return {
+            "source": "Saved artifact",
+            "model_label": saved.get("model_type", "Saved champion model"),
+            "preprocessor": saved["preprocessor"],
+            "label_encoder": saved["label_encoder"],
+            "base_model": saved["base_model"],
+            "calibrated_model": saved["calibrated_model"],
+            "feature_names": saved["feature_names"],
+            "feature_cols": list(saved["feature_cols"]),
+        }
+
+    return None
+
+
+def extract_preprocessor_columns(preprocessor):
+    numeric_cols, categorical_cols = [], []
+    for name, _transformer, cols in getattr(preprocessor, "transformers_", []):
+        if name == "num":
+            numeric_cols = list(cols)
+        elif name == "cat":
+            categorical_cols = list(cols)
+    return numeric_cols, categorical_cols
+
+
+def prepare_inference_features(df, bundle):
+    numeric_cols, categorical_cols = extract_preprocessor_columns(bundle["preprocessor"])
+    feature_cols = list(bundle["feature_cols"])
+    prepared_cols = {}
+
+    for col in feature_cols:
+        if col in categorical_cols:
+            if col in df.columns:
+                prepared_cols[col] = df[col].astype("object").where(df[col].notna(), "MISSING").astype(str)
+            else:
+                prepared_cols[col] = pd.Series(["MISSING"] * len(df), index=df.index, dtype="object")
+        else:
+            if col in df.columns:
+                prepared_cols[col] = pd.to_numeric(df[col], errors="coerce")
+            else:
+                prepared_cols[col] = pd.Series(np.nan, index=df.index, dtype="float64")
+
+    for col in numeric_cols:
+        if col not in prepared_cols:
+            prepared_cols[col] = pd.Series(np.nan, index=df.index, dtype="float64")
+    for col in categorical_cols:
+        if col not in prepared_cols:
+            prepared_cols[col] = pd.Series(["MISSING"] * len(df), index=df.index, dtype="object")
+
+    prepared = pd.DataFrame(prepared_cols, index=df.index)
+    return prepared[bundle["feature_cols"]]
+
+
+def run_multiclass_inference(bundle, scoring_df):
+    prepared = prepare_inference_features(scoring_df, bundle)
+    processed = bundle["preprocessor"].transform(prepared)
+    probabilities = bundle["calibrated_model"].predict_proba(processed)
+    pred_idx = np.argmax(probabilities, axis=1)
+    pred_labels = bundle["label_encoder"].inverse_transform(pred_idx)
+    confidence = probabilities.max(axis=1)
+    top_order = np.argsort(probabilities, axis=1)[:, ::-1][:, :3]
+    classes = bundle["label_encoder"].classes_
+
+    top_summaries = []
+    for row_idx in range(len(scoring_df)):
+        parts = []
+        for cls_idx in top_order[row_idx]:
+            parts.append(f"{classes[cls_idx]} ({probabilities[row_idx, cls_idx]:.2f})")
+        top_summaries.append(" | ".join(parts))
+
+    scored = scoring_df.copy()
+    scored["predicted_label"] = pred_labels
+    scored["prediction_confidence"] = np.round(confidence, 4)
+    scored["top_predictions"] = top_summaries
+
+    actual_encoded = None
+    report_df = None
+    confusion_df = None
+    accuracy = None
+    macro_f1 = None
+    if "label" in scored.columns:
+        actual_labels = scored["label"].astype(str).values
+        if np.isin(actual_labels, classes).all():
+            from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
+
+            actual_encoded = bundle["label_encoder"].transform(actual_labels)
+            accuracy = accuracy_score(actual_encoded, pred_idx)
+            macro_f1 = f1_score(actual_encoded, pred_idx, average="macro")
+            report_df = pd.DataFrame(
+                classification_report(
+                    actual_encoded,
+                    pred_idx,
+                    target_names=classes,
+                    output_dict=True,
+                    zero_division=0,
+                )
+            ).transpose()
+            confusion_df = pd.DataFrame(
+                confusion_matrix(actual_encoded, pred_idx),
+                index=classes,
+                columns=classes,
+            )
+            scored["is_correct"] = scored["label"].astype(str) == scored["predicted_label"]
+
+    return {
+        "prepared": prepared,
+        "processed": processed,
+        "probabilities": probabilities,
+        "pred_idx": pred_idx,
+        "pred_labels": pred_labels,
+        "scored_df": scored,
+        "report_df": report_df,
+        "confusion_df": confusion_df,
+        "accuracy": accuracy,
+        "macro_f1": macro_f1,
+        "actual_encoded": actual_encoded,
+    }
+
+
+def compute_lime_explanation(processed_matrix, bundle, row_position, predicted_class_idx, num_features=10):
+    try:
+        from lime.lime_tabular import LimeTabularExplainer
+    except Exception as exc:
+        raise RuntimeError("LIME is not installed in the active environment.") from exc
+
+    row_position = int(row_position)
+    sample_size = min(int(processed_matrix.shape[0]), 300)
+    if sample_size <= 0:
+        return pd.DataFrame(columns=["feature", "weight", "direction"])
+
+    rng = np.random.default_rng(CONFIG["random_state"])
+    if processed_matrix.shape[0] > sample_size:
+        sample_idx = rng.choice(processed_matrix.shape[0], size=sample_size, replace=False)
+    else:
+        sample_idx = np.arange(processed_matrix.shape[0])
+
+    if hasattr(processed_matrix, "toarray"):
+        background = processed_matrix[sample_idx].toarray()
+        instance = processed_matrix[row_position].toarray()[0]
+    else:
+        dense = np.asarray(processed_matrix)
+        background = dense[sample_idx]
+        instance = dense[row_position]
+
+    explainer = LimeTabularExplainer(
+        training_data=background,
+        feature_names=[str(item) for item in bundle["feature_names"]],
+        class_names=[str(item) for item in bundle["label_encoder"].classes_],
+        mode="classification",
+        discretize_continuous=True,
+        random_state=CONFIG["random_state"],
+    )
+    explanation = explainer.explain_instance(
+        instance,
+        bundle["calibrated_model"].predict_proba,
+        num_features=min(int(num_features), len(bundle["feature_names"])),
+        top_labels=1,
+    )
+    available_labels = explanation.available_labels()
+    target_label = int(predicted_class_idx) if int(predicted_class_idx) in available_labels else available_labels[0]
+    lime_df = pd.DataFrame(explanation.as_list(label=target_label), columns=["feature", "weight"])
+    lime_df["direction"] = np.where(lime_df["weight"] >= 0, "Supports prediction", "Pushes against prediction")
+    return lime_df
+
+
 def run_demo_pipeline():
     import random
 
@@ -2114,6 +2382,7 @@ def render_sidebar_v2():
         {"label": "Feature Engineering", "key": "3. Feature Engineering", "step": 3},
         {"label": "Graph Analytics", "key": "4. Graph Analytics", "step": 4},
         {"label": "Model Training", "key": "5. Model Training", "step": 5},
+        {"label": "Model Inference", "key": "Model Inference", "step": 0},
         {"label": "Alert Engine", "key": "6. Alert Engine", "step": 6},
         {"label": "Feedback Loop", "key": "7. Feedback Loop", "step": 7},
         {"label": "Export", "key": "8. Export", "step": 8},
@@ -2185,7 +2454,7 @@ def render_sidebar_v2():
             st.rerun()
 
     with st.expander("Stage Status", expanded=False):
-        for item in nav_items[1:9]:
+        for item in [entry for entry in nav_items if 1 <= entry["step"] <= 8]:
             done = step_done.get(item["step"], False)
             status = "Ready" if done else "Pending"
             st.markdown(f"`{item['label']}`  {status}")
@@ -2333,6 +2602,7 @@ def init_session_state():
         "run_metadata": None,
         "step_times": {},
         "feature_cols": None,
+        "inference_batch": None,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -3352,10 +3622,12 @@ def page_model_training():
         tab1, tab2, tab3 = st.tabs(["Classification Report", "Confusion Matrix", "Feature Importance"])
 
         with tab1:
+            st.caption("Per-class precision, recall, and F1 scores for the champion model on the held-out test set.")
             report = classification_report(y_test, test_pred, target_names=le.classes_, output_dict=True)
             st.dataframe(pd.DataFrame(report).transpose().round(4), use_container_width=True, height=400)
 
         with tab2:
+            st.caption("The confusion matrix highlights where mule typologies are being confused with one another.")
             cm = confusion_matrix(y_test, test_pred)
             cm_df = pd.DataFrame(cm, index=le.classes_, columns=le.classes_)
             fig = px.imshow(cm_df, text_auto=True, color_continuous_scale=[[0, "#F8ECE1"], [0.5, "#D04A02"], [1, "#FFB600"]])
@@ -3364,6 +3636,7 @@ def page_model_training():
             st.plotly_chart(fig, use_container_width=True)
 
         with tab3:
+            st.caption("Feature importance shows which engineered signals contribute most to the multiclass decisioning.")
             fi = st.session_state.feature_importance
             top_n = st.slider("Top N", 10, 50, 25)
             top_fi = fi.head(top_n)
@@ -3432,6 +3705,355 @@ def page_model_training():
                 fig = apply_dark_theme(fig)
                 fig.update_layout(height=420)
                 st.plotly_chart(fig, use_container_width=True)
+
+
+def page_model_inference():
+    render_top_bar("Model Inference", "Generate fresh synthetic test data, compare trained models, and explain single predictions")
+    render_page_intro("This page regenerates an out-of-sample synthetic batch, scores it with the trained champion model, and lets you inspect the HMM sequence layer for abnormal behavior.")
+
+    bundle = get_active_model_bundle()
+
+    render_section("Inference Controls", "science")
+    render_section_note("Generate a fresh test batch using the current run profile. The same entity resolution, feature engineering, graph enrichment, and sequence steps are applied before scoring. For the quickest demo loop, switch the sidebar run profile to Fast before generating the batch.")
+
+    control_cols = st.columns([0.9, 1.0, 1.2])
+    with control_cols[0]:
+        default_seed = int(st.session_state.inference_batch["seed"]) if st.session_state.inference_batch else int(CONFIG["random_state"]) + 17
+        inference_seed = st.number_input("Inference seed", value=default_seed, min_value=1, max_value=99999)
+    with control_cols[1]:
+        model_choice = st.selectbox(
+            "Inference model",
+            ["Random Forest Champion", "Hidden Markov Sequence"],
+            index=0,
+        )
+    with control_cols[2]:
+        st.caption(f"Using run profile: {st.session_state.demo_profile}")
+        model_source = bundle["source"] if bundle is not None else "No trained champion available yet"
+        st.caption(f"Champion source: {model_source}")
+
+    if st.button("Generate Fresh Test Batch", type="primary", use_container_width=True):
+        with st.spinner("Generating fresh synthetic test batch and enrichment layers..."):
+            st.session_state.inference_batch = generate_fresh_inference_batch(int(inference_seed))
+        st.rerun()
+
+    batch = st.session_state.inference_batch
+    if batch is None:
+        st.info("Generate a fresh test batch to open the inference workspace.")
+        return
+
+    test_df = batch.get("test_df")
+    if test_df is None or len(test_df) == 0:
+        st.warning("The generated test batch did not contain a usable holdout window. Try another seed or a larger profile.")
+        return
+
+    render_section("Fresh Batch Snapshot", "insights")
+    render_section_note("These metrics describe the generated holdout batch that is being used for inference and evaluation.")
+
+    risky_count = int(test_df["label"].isin(CONFIG["risky_labels"]).sum()) if "label" in test_df.columns else 0
+    runtime_secs = sum(batch.get("timings", {}).values())
+    snapshot_cols = st.columns(4)
+    with snapshot_cols[0]:
+        render_kpi("data_array", "Test Records", f"{len(test_df):,}", "Holdout rows scored in this view", "orange")
+    with snapshot_cols[1]:
+        render_kpi("warning", "Risky Labels", f"{risky_count:,}", "Rows belonging to risky mule classes", "red")
+    with snapshot_cols[2]:
+        render_kpi("hub", "Rings", f"{int(batch.get('ring_count', 0)):,}", "Detected during fresh graph enrichment", "teal")
+    with snapshot_cols[3]:
+        render_kpi("timer", "Build Time", f"{runtime_secs:.1f}s", batch.get("generated_at", ""), "gold")
+
+    timing_df = pd.DataFrame(
+        [{"Step": key, "Seconds": value} for key, value in batch.get("timings", {}).items()]
+    )
+    if not timing_df.empty:
+        fig = px.bar(
+            timing_df,
+            x="Seconds",
+            y="Step",
+            orientation="h",
+            color="Seconds",
+            color_continuous_scale=[[0, "#F7E6DA"], [0.5, "#D04A02"], [1, "#FFB600"]],
+            title="Fresh batch preparation timing",
+        )
+        fig = apply_dark_theme(fig)
+        fig.update_layout(height=max(320, len(timing_df) * 26), showlegend=False, yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig, use_container_width=True)
+
+    if model_choice == "Random Forest Champion":
+        render_section("Champion Multiclass Output", "model_training")
+        render_section_note("This view uses the calibrated champion classifier to predict mule typologies for the fresh holdout batch and explains one selected prediction with LIME.")
+
+        if bundle is None:
+            st.warning("Train the champion model in Step 5 or save the export bundle before using multiclass inference.")
+            return
+
+        inference_result = run_multiclass_inference(bundle, test_df)
+        scored_df = inference_result["scored_df"]
+
+        metric_cols = st.columns(4)
+        with metric_cols[0]:
+            render_kpi("inventory", "Model", bundle["model_label"], bundle["source"], "orange")
+        with metric_cols[1]:
+            render_kpi("precision_manufacturing", "Predicted Classes", f"{scored_df['predicted_label'].nunique():,}", "Unique classes predicted on this batch", "teal")
+        with metric_cols[2]:
+            avg_conf = float(scored_df["prediction_confidence"].mean()) if len(scored_df) else 0.0
+            render_kpi("verified", "Avg Confidence", f"{avg_conf:.3f}", "Mean top-class probability", "gold")
+        with metric_cols[3]:
+            if inference_result["macro_f1"] is not None:
+                render_kpi("leaderboard", "Macro F1", f"{inference_result['macro_f1']:.3f}", "Fresh synthetic holdout", "green")
+            else:
+                render_kpi("leaderboard", "Macro F1", "Unavailable", "Ground-truth labels were not aligned", "green")
+
+        rf_tabs = st.tabs(["Predictions", "Confusion Matrix", "Classification Report", "LIME Explanation"])
+
+        with rf_tabs[0]:
+            st.caption("Review the predicted class mix, confidence spread, and the highest-confidence scored rows.")
+            pred_cols = st.columns(2)
+            with pred_cols[0]:
+                pred_dist = scored_df["predicted_label"].value_counts().reset_index()
+                pred_dist.columns = ["Predicted Label", "Count"]
+                fig = px.bar(pred_dist, x="Predicted Label", y="Count", color="Predicted Label", title="Predicted class distribution")
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=360, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+            with pred_cols[1]:
+                fig = px.histogram(scored_df, x="prediction_confidence", nbins=30, color_discrete_sequence=[PWC_COLORS["primary"]], title="Prediction confidence")
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=360)
+                st.plotly_chart(fig, use_container_width=True)
+
+            preview_cols = [c for c in ["customer_id", "account_id", "channel", "label", "predicted_label", "prediction_confidence", "top_predictions"] if c in scored_df.columns]
+            st.dataframe(
+                scored_df.sort_values("prediction_confidence", ascending=False)[preview_cols].head(150),
+                use_container_width=True,
+                height=360,
+            )
+
+            if "is_correct" in scored_df.columns:
+                errors = scored_df[~scored_df["is_correct"]].copy()
+                if not errors.empty:
+                    st.caption("Top confident misclassifications")
+                    error_cols = [c for c in ["customer_id", "account_id", "label", "predicted_label", "prediction_confidence", "top_predictions"] if c in errors.columns]
+                    st.dataframe(
+                        errors.sort_values("prediction_confidence", ascending=False)[error_cols].head(50),
+                        use_container_width=True,
+                        height=240,
+                    )
+
+        with rf_tabs[1]:
+            st.caption("The confusion matrix shows where the champion model overlaps across mule typologies on the fresh holdout batch.")
+            if inference_result["confusion_df"] is not None:
+                fig = px.imshow(
+                    inference_result["confusion_df"],
+                    text_auto=True,
+                    color_continuous_scale=[[0, "#F8ECE1"], [0.5, "#D04A02"], [1, "#FFB600"]],
+                    title="Fresh holdout confusion matrix",
+                )
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=700)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Ground-truth labels were not available for a full confusion matrix.")
+
+        with rf_tabs[2]:
+            st.caption("The classification report summarizes precision, recall, and F1 for each mule typology.")
+            if inference_result["report_df"] is not None:
+                st.dataframe(inference_result["report_df"].round(4), use_container_width=True, height=500)
+            else:
+                st.info("Ground-truth labels were not available for a full classification report.")
+
+        with rf_tabs[3]:
+            st.caption("LIME explains one scored record in the processed model feature space. This is the most reliable local explanation path for the champion model in this app.")
+            explain_limit = min(len(scored_df), 120)
+            explain_options = []
+            explain_map = {}
+            for position in range(explain_limit):
+                row = scored_df.iloc[position]
+                row_label = row.get("customer_id", row.get("account_id", f"Row {position + 1}"))
+                explain_text = f"{position + 1}. {row_label} | pred={row['predicted_label']} | conf={row['prediction_confidence']:.2f}"
+                if "label" in row.index:
+                    explain_text += f" | actual={row['label']}"
+                explain_options.append(explain_text)
+                explain_map[explain_text] = position
+
+            if not explain_options:
+                st.info("No scored rows are available for explanation.")
+            else:
+                explain_cols = st.columns([1.4, 0.7])
+                with explain_cols[0]:
+                    selected_option = st.selectbox("Record to explain", explain_options, key="lime_record_select")
+                with explain_cols[1]:
+                    lime_feature_count = st.slider("Top features", 6, 15, 10, key="lime_feature_count")
+
+                if st.button("Generate LIME Explanation", type="secondary", key="lime_generate_button"):
+                    selected_position = explain_map[selected_option]
+                    try:
+                        with st.spinner("Generating local explanation..."):
+                            lime_df = compute_lime_explanation(
+                                inference_result["processed"],
+                                bundle,
+                                selected_position,
+                                inference_result["pred_idx"][selected_position],
+                                num_features=lime_feature_count,
+                            )
+                    except RuntimeError as exc:
+                        st.warning(str(exc))
+                    else:
+                        if lime_df.empty:
+                            st.info("LIME did not return a usable explanation for this record.")
+                        else:
+                            explanation_fig = px.bar(
+                                lime_df.sort_values("weight"),
+                                x="weight",
+                                y="feature",
+                                orientation="h",
+                                color="direction",
+                                color_discrete_map={
+                                    "Supports prediction": PWC_COLORS["primary"],
+                                    "Pushes against prediction": PWC_COLORS["accent_teal"],
+                                },
+                                title="Local feature contributions",
+                            )
+                            explanation_fig = apply_dark_theme(explanation_fig)
+                            explanation_fig.update_layout(height=max(360, len(lime_df) * 34))
+                            st.plotly_chart(explanation_fig, use_container_width=True)
+                            st.dataframe(lime_df.round(4), use_container_width=True, height=280)
+
+    else:
+        render_section("Hidden Markov Sequence View", "timeline")
+        render_section_note("The HMM is an unsupervised sequence layer. It does not directly assign mule typologies, but it surfaces unusual state transitions and abnormal behavior intensity.")
+
+        hmm_df = test_df.copy()
+        if "hmm_sequence_anomaly_score" not in hmm_df.columns:
+            st.warning("HMM outputs were not available on this batch. Generate another batch or verify the sequence stage.")
+            return
+
+        anomaly_min = float(hmm_df["hmm_sequence_anomaly_score"].min())
+        anomaly_max = float(hmm_df["hmm_sequence_anomaly_score"].max())
+        default_threshold = float(hmm_df["hmm_sequence_anomaly_score"].quantile(0.85))
+        if anomaly_max > anomaly_min:
+            anomaly_threshold = st.slider(
+                "Anomaly threshold",
+                min_value=anomaly_min,
+                max_value=anomaly_max,
+                value=default_threshold,
+                step=max((anomaly_max - anomaly_min) / 100, 0.001),
+            )
+        else:
+            anomaly_threshold = anomaly_max
+            st.caption("All HMM anomaly scores are currently identical on this batch, so the threshold is fixed.")
+
+        hmm_df["predicted_risky_flag"] = (hmm_df["hmm_sequence_anomaly_score"] >= anomaly_threshold).astype(int)
+        if "label" in hmm_df.columns:
+            hmm_df["actual_risky_flag"] = hmm_df["label"].isin(CONFIG["risky_labels"]).astype(int)
+
+        hmm_metric_cols = st.columns(4)
+        with hmm_metric_cols[0]:
+            render_kpi("timeline", "Rows Scored", f"{len(hmm_df):,}", "Sequence rows in the holdout batch", "orange")
+        with hmm_metric_cols[1]:
+            render_kpi("psychology", "Avg Anomaly", f"{hmm_df['hmm_sequence_anomaly_score'].mean():.3f}", "Mean HMM anomaly intensity", "teal")
+        with hmm_metric_cols[2]:
+            render_kpi("warning", "Flagged Rows", f"{int(hmm_df['predicted_risky_flag'].sum()):,}", "Rows above the anomaly threshold", "red")
+        with hmm_metric_cols[3]:
+            state_count = hmm_df["hmm_state"].nunique() if "hmm_state" in hmm_df.columns else 0
+            render_kpi("hub", "States", f"{state_count}", f"Sequence model: {batch.get('sequence_model_type', 'unknown')}", "gold")
+
+        hmm_tabs = st.tabs(["Sequence Risk", "State Overlay", "Binary Confusion", "Flagged Cases"])
+
+        with hmm_tabs[0]:
+            st.caption("Review anomaly spread and how the sequence risk layer varies across actual labels.")
+            seq_cols = st.columns(2)
+            with seq_cols[0]:
+                fig = px.histogram(
+                    hmm_df,
+                    x="hmm_sequence_anomaly_score",
+                    nbins=30,
+                    color_discrete_sequence=[PWC_COLORS["primary"]],
+                    title="HMM anomaly score distribution",
+                )
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=360)
+                st.plotly_chart(fig, use_container_width=True)
+            with seq_cols[1]:
+                if "label" in hmm_df.columns:
+                    sample_size = min(len(hmm_df), 2000)
+                    plot_df = hmm_df.sample(sample_size, random_state=CONFIG["random_state"]) if len(hmm_df) > sample_size else hmm_df
+                    fig = px.box(
+                        plot_df,
+                        x="label",
+                        y="hmm_sequence_anomaly_score",
+                        color="label",
+                        title="Anomaly score by actual label",
+                    )
+                    fig = apply_dark_theme(fig)
+                    fig.update_layout(height=360, showlegend=False)
+                    st.plotly_chart(fig, use_container_width=True)
+
+        with hmm_tabs[1]:
+            st.caption("This overlay shows how actual labels are distributed across HMM states. It is a state interpretation aid, not a direct multiclass HMM prediction.")
+            if {"hmm_state", "label"}.issubset(hmm_df.columns):
+                state_overlay = pd.crosstab(hmm_df["hmm_state"], hmm_df["label"])
+                fig = px.imshow(
+                    state_overlay,
+                    text_auto=True,
+                    color_continuous_scale=[[0, "#F8ECE1"], [0.5, "#D04A02"], [1, "#FFB600"]],
+                    title="Actual label distribution by HMM state",
+                )
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=520)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("State overlay becomes available when both HMM states and actual labels are present.")
+
+        with hmm_tabs[2]:
+            st.caption("Because the HMM is unsupervised, the direct evaluation here is binary: flagged sequence versus actual risky label.")
+            if "actual_risky_flag" in hmm_df.columns:
+                from sklearn.metrics import classification_report, confusion_matrix, f1_score, precision_score, recall_score
+
+                binary_cm = pd.DataFrame(
+                    confusion_matrix(hmm_df["actual_risky_flag"], hmm_df["predicted_risky_flag"]),
+                    index=["Actual Legit", "Actual Risky"],
+                    columns=["Pred Legit", "Pred Risky"],
+                )
+                fig = px.imshow(
+                    binary_cm,
+                    text_auto=True,
+                    color_continuous_scale=[[0, "#F8ECE1"], [0.5, "#D04A02"], [1, "#FFB600"]],
+                    title="Binary risky-versus-legit confusion matrix",
+                )
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=420)
+                st.plotly_chart(fig, use_container_width=True)
+
+                binary_metrics = pd.DataFrame(
+                    [
+                        {"Metric": "Precision", "Score": precision_score(hmm_df["actual_risky_flag"], hmm_df["predicted_risky_flag"], zero_division=0)},
+                        {"Metric": "Recall", "Score": recall_score(hmm_df["actual_risky_flag"], hmm_df["predicted_risky_flag"], zero_division=0)},
+                        {"Metric": "F1", "Score": f1_score(hmm_df["actual_risky_flag"], hmm_df["predicted_risky_flag"], zero_division=0)},
+                    ]
+                )
+                st.dataframe(binary_metrics.round(4), use_container_width=True, height=160)
+
+                binary_report = pd.DataFrame(
+                    classification_report(
+                        hmm_df["actual_risky_flag"],
+                        hmm_df["predicted_risky_flag"],
+                        target_names=["legit", "risky"],
+                        output_dict=True,
+                        zero_division=0,
+                    )
+                ).transpose()
+                st.dataframe(binary_report.round(4), use_container_width=True, height=240)
+            else:
+                st.info("Actual labels were not available for a binary risky-versus-legit evaluation.")
+
+        with hmm_tabs[3]:
+            st.caption("These are the highest-scoring anomalous sequences according to the HMM layer.")
+            flagged_cols = [c for c in ["customer_id", "account_id", "channel", "label", "hmm_state", "hmm_sequence_anomaly_score", "hazard_score"] if c in hmm_df.columns]
+            st.dataframe(
+                hmm_df.sort_values("hmm_sequence_anomaly_score", ascending=False)[flagged_cols].head(150),
+                use_container_width=True,
+                height=420,
+            )
 
 
 def page_alerts():
@@ -3948,6 +4570,8 @@ def main():
         page_graph_analytics()
     elif page == "5. Model Training":
         page_model_training()
+    elif page == "Model Inference":
+        page_model_inference()
     elif page == "6. Alert Engine":
         page_alerts()
     elif page == "7. Feedback Loop":
