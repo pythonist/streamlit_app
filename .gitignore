@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+
+best_model.pkl
+base_model_for_onnx.pkl
+mule_detection_model.onnx
+feature_importance.csv
+streamlit_stdout.log
+streamlit_stderr.log
