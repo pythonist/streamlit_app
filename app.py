@@ -60,6 +60,8 @@ UI_THEMES = {
         "surface_soft": "#F9F4EE",
         "sidebar": "#241B16",
         "sidebar_soft": "#2F241D",
+        "sidebar_text": "#F8EFE6",
+        "sidebar_muted": "#D9C5B4",
         "text": "#1E1A17",
         "muted": "#6C645C",
         "line": "#E5D8CB",
@@ -73,6 +75,8 @@ UI_THEMES = {
         "surface_soft": "#1D222B",
         "sidebar": "#0B0E13",
         "sidebar_soft": "#131821",
+        "sidebar_text": "#E7ECF4",
+        "sidebar_muted": "#B3BDCC",
         "text": "#F3F4F6",
         "muted": "#B7BDC7",
         "line": "#2B3440",
@@ -847,6 +851,10 @@ def inject_theme_css():
             color: {theme["text"]} !important;
         }}
 
+        .main .block-container {{
+            padding-top: 0.75rem !important;
+        }}
+
         header[data-testid="stHeader"] {{
             background: {theme["surface"]}DD !important;
             border-bottom: 1px solid {theme["line"]} !important;
@@ -854,13 +862,64 @@ def inject_theme_css():
 
         div[data-testid="stSidebar"] {{
             background: linear-gradient(180deg, {theme["sidebar"]} 0%, {theme["sidebar_soft"]} 100%) !important;
+            border-right: 1px solid {theme["line"]} !important;
         }}
 
         div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
         div[data-testid="stSidebar"] label,
         div[data-testid="stSidebar"] .stRadio label,
         div[data-testid="stSidebar"] .stCaption {{
-            color: #ECE3DB !important;
+            color: {theme["sidebar_muted"]} !important;
+        }}
+
+        div[data-testid="stSidebar"] h1,
+        div[data-testid="stSidebar"] h2,
+        div[data-testid="stSidebar"] h3,
+        div[data-testid="stSidebar"] h4,
+        div[data-testid="stSidebar"] h5,
+        div[data-testid="stSidebar"] h6,
+        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] strong,
+        div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] span {{
+            color: {theme["sidebar_text"]} !important;
+        }}
+
+        div[data-testid="stSidebar"] .stButton > button {{
+            border: 1px solid {theme["line"]} !important;
+        }}
+
+        div[data-testid="stSidebar"] button[kind="secondary"] {{
+            background: {theme["sidebar_soft"]} !important;
+            color: {theme["sidebar_text"]} !important;
+        }}
+
+        div[data-testid="stSidebar"] button[kind="primary"] {{
+            color: #FFFFFF !important;
+        }}
+
+        div[data-testid="stSidebar"] .stSelectbox > div > div,
+        div[data-testid="stSidebar"] .stNumberInput > div > div > input,
+        div[data-testid="stSidebar"] .stRadio > div {{
+            background: {theme["sidebar_soft"]} !important;
+            color: {theme["sidebar_text"]} !important;
+            border-color: {theme["line"]} !important;
+        }}
+
+        .sidebar-brand {{
+            font-size: 1.02rem;
+            font-weight: 800;
+            color: {theme["sidebar_text"]};
+        }}
+
+        .sidebar-desc {{
+            font-size: 0.76rem;
+            line-height: 1.45;
+            color: {theme["sidebar_muted"]};
+            margin-top: 0.3rem;
+        }}
+
+        .sidebar-meta {{
+            font-size: 0.72rem;
+            color: {theme["sidebar_muted"]};
         }}
 
         .hero-shell, .overview-panel, .kpi-card, .data-card, .graph-shell, .stat-chip {{
@@ -873,8 +932,8 @@ def inject_theme_css():
         .hero-shell {{
             border: 1px solid {theme["line"]};
             border-radius: 28px;
-            padding: 1.8rem 1.9rem 1.5rem 1.9rem;
-            margin-bottom: 1rem;
+            padding: 1.35rem 1.6rem 1.15rem 1.6rem;
+            margin-bottom: 0.85rem;
         }}
 
         .hero-kicker {{
@@ -887,27 +946,27 @@ def inject_theme_css():
             color: {PWC_COLORS["primary"]};
             font-size: 0.72rem;
             font-weight: 700;
-            margin-bottom: 0.8rem;
+            margin-bottom: 0.5rem;
         }}
 
         .hero-title {{
             margin: 0;
             color: {theme["text"]};
-            font-size: 2.2rem;
+            font-size: 1.85rem;
             line-height: 1.05;
             text-align: left;
         }}
 
         .hero-subtitle {{
-            margin: 0.75rem 0 0 0;
+            margin: 0.55rem 0 0 0;
             color: {theme["muted"]};
-            font-size: 0.98rem;
+            font-size: 0.92rem;
             max-width: 900px;
             text-align: left;
         }}
 
         .hero-stage {{
-            margin-top: 1rem;
+            margin-top: 0.7rem;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -940,8 +999,8 @@ def inject_theme_css():
         .stat-chip {{
             border: 1px solid {theme["line"]};
             border-radius: 18px;
-            padding: 0.95rem 1rem;
-            min-height: 88px;
+            padding: 0.85rem 0.95rem;
+            min-height: 78px;
         }}
 
         .stat-chip .label {{
@@ -1523,16 +1582,16 @@ def run_demo_pipeline():
 
 def render_sidebar_v2():
     nav_items = [
-        {"label": "Overview", "icon": "🏠", "key": "Overview", "step": 0},
-        {"label": "Data Generation", "icon": "🗂️", "key": "1. Data Generation", "step": 1},
-        {"label": "Entity Resolution", "icon": "🧩", "key": "2. Entity Resolution", "step": 2},
-        {"label": "Feature Engineering", "icon": "🛠️", "key": "3. Feature Engineering", "step": 3},
-        {"label": "Graph Analytics", "icon": "🕸️", "key": "4. Graph Analytics", "step": 4},
-        {"label": "Model Training", "icon": "🤖", "key": "5. Model Training", "step": 5},
-        {"label": "Alert Engine", "icon": "🚨", "key": "6. Alert Engine", "step": 6},
-        {"label": "Feedback Loop", "icon": "🔁", "key": "7. Feedback Loop", "step": 7},
-        {"label": "Export", "icon": "📦", "key": "8. Export", "step": 8},
-        {"label": "Monitoring", "icon": "📈", "key": "Monitoring", "step": 9},
+        {"label": "Overview", "key": "Overview", "step": 0},
+        {"label": "Data Generation", "key": "1. Data Generation", "step": 1},
+        {"label": "Entity Resolution", "key": "2. Entity Resolution", "step": 2},
+        {"label": "Feature Engineering", "key": "3. Feature Engineering", "step": 3},
+        {"label": "Graph Analytics", "key": "4. Graph Analytics", "step": 4},
+        {"label": "Model Training", "key": "5. Model Training", "step": 5},
+        {"label": "Alert Engine", "key": "6. Alert Engine", "step": 6},
+        {"label": "Feedback Loop", "key": "7. Feedback Loop", "step": 7},
+        {"label": "Export", "key": "8. Export", "step": 8},
+        {"label": "Monitoring", "key": "Monitoring", "step": 9},
     ]
 
     step_done = {
@@ -1552,8 +1611,8 @@ def render_sidebar_v2():
     st.markdown(
         f"""
         <div style="padding:0.15rem 0 0.75rem 0;">
-            <div style="font-size:1.02rem; font-weight:800; color:#FFF5EF;">PwC {APP_NAME}</div>
-            <div style="font-size:0.76rem; line-height:1.45; color:#D8C6B7; margin-top:0.3rem;">{APP_DESCRIPTION}</div>
+            <div class="sidebar-brand">PwC {APP_NAME}</div>
+            <div class="sidebar-desc">{APP_DESCRIPTION}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1566,8 +1625,8 @@ def render_sidebar_v2():
         f"""
         <div style="padding:0 0.35rem 0.5rem 0.35rem; margin-bottom:0.8rem;">
             <div style="display:flex; justify-content:space-between; margin-bottom:0.3rem;">
-                <span style="font-size:0.72rem; color:#E9DDD3;">Stages</span>
-                <span style="font-size:0.72rem; color:#FFD2BA;">{completed}/8 complete</span>
+                <span class="sidebar-meta">Stages</span>
+                <span class="sidebar-meta">{completed}/8 complete</span>
             </div>
             <div style="height:6px; background:rgba(255,255,255,0.08); border-radius:999px; overflow:hidden;">
                 <div style="height:100%; width:{pct*100}%; background:linear-gradient(90deg, {PWC_COLORS["primary"]}, {PWC_COLORS["accent_gold"]}); border-radius:999px;"></div>
@@ -1587,7 +1646,7 @@ def render_sidebar_v2():
 
     for item in nav_items:
         ready = item["step"] == 0 or step_done.get(item["step"], False)
-        label = f"{item['icon']}  {item['label']}"
+        label = f"{item['label']}"
         if ready and item["step"] not in (0, 9):
             label += "  READY"
         if st.button(
@@ -1816,7 +1875,7 @@ def render_sidebar():
         is_done = step_done.get(item["step"], False)
 
         if st.button(
-            f"{'● ' if is_active else ''}{item['label']}",
+            f\"{'* ' if is_active else ''}{item['label']}\",
             key=f"nav_{item['key']}",
             use_container_width=True,
             type="primary" if is_active else "secondary"
