@@ -1875,7 +1875,7 @@ def render_sidebar():
         is_done = step_done.get(item["step"], False)
 
         if st.button(
-            f\"{'* ' if is_active else ''}{item['label']}\",
+            f"{'* ' if is_active else ''}{item['label']}",
             key=f"nav_{item['key']}",
             use_container_width=True,
             type="primary" if is_active else "secondary"
