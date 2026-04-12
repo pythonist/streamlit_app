@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import warnings
 from config import CONFIG
 from utils import print_step
 
@@ -7,8 +8,10 @@ class FeatureEngineering:
     def run_eda_and_imputation(self, df):
         print_step("STEP 6: EDA + IMPUTATION")
         print("Shape:", df.shape)
-        print(df["channel"].value_counts(dropna=False))
-        print(df["mule_category"].value_counts(dropna=False))
+        if "channel" in df.columns:
+            print(df["channel"].value_counts(dropna=False))
+        if "mule_category" in df.columns:
+            print(df["mule_category"].value_counts(dropna=False))
         print(df.isna().mean().sort_values(ascending=False).head(20))
         out = df.copy()
         num_cols = out.select_dtypes(include=[np.number]).columns
@@ -17,6 +20,7 @@ class FeatureEngineering:
             out[c] = out[c].fillna(out[c].median())
         for c in obj_cols:
             out[c] = out[c].fillna("UNKNOWN")
+        out = out.replace([np.inf, -np.inf], np.nan)
         return out
 
     def feature_engineering(self, df):
@@ -24,14 +28,25 @@ class FeatureEngineering:
         # Defensively handle missing sort columns
         sort_cols = [c for c in ["customer_id", "event_ts"] if c in df.columns]
         out = df.copy().sort_values(sort_cols).reset_index(drop=True) if sort_cols else df.copy().reset_index(drop=True)
+        if "event_ts" in out.columns:
+            out["event_ts"] = pd.to_datetime(out["event_ts"], errors="coerce")
+            out["event_ts"] = out["event_ts"].fillna(pd.Timestamp("2024-01-01"))
+        else:
+            out["event_ts"] = pd.Timestamp("2024-01-01")
         # Ensure customer_id exists; fall back to index-based synthetic id
         if "customer_id" not in out.columns:
             out["customer_id"] = ("CUST_" + out.index.astype(str))
-        if "event_ts" not in out.columns:
-            out["event_ts"] = pd.Timestamp("2024-01-01")
+        date_like_cols = [c for c in out.columns if any(token in c.lower() for token in ["date", "timestamp", "time"])]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            for col in date_like_cols:
+                if out[col].dtype == "object" or not pd.api.types.is_datetime64_any_dtype(out[col]):
+                    out[col] = pd.to_datetime(out[col], errors="coerce", cache=True)
+        out["event_date"] = out["event_ts"].dt.floor("D")
         out["event_hour"] = out["event_ts"].dt.hour
         out["event_dayofweek"] = out["event_ts"].dt.dayofweek
         out["event_month"] = out["event_ts"].dt.month
+        out["hour_bucket"] = pd.cut(out["event_hour"], bins=[-1, 5, 11, 17, 23], labels=["overnight", "morning", "afternoon", "evening"])
         out["is_weekend"] = out["event_dayofweek"].isin([5, 6]).astype(int)
         out["is_night"] = out["event_hour"].isin([0, 1, 2, 3, 4, 5]).astype(int)
         if "customer_date_of_birth" in out.columns:
@@ -65,6 +80,7 @@ class FeatureEngineering:
         out["cust_mean_amount_so_far"] = out.groupby("customer_id")["amount"].expanding().mean().reset_index(level=0, drop=True)
         out["cust_std_amount_so_far"] = out.groupby("customer_id")["amount"].expanding().std().reset_index(level=0, drop=True)
         out["cust_amount_zscore"] = (out["amount"] - out["cust_mean_amount_so_far"]) / out["cust_std_amount_so_far"].replace(0, np.nan)
+        out["cust_std_amount_so_far"] = out["cust_std_amount_so_far"].fillna(0)
         out["first_time_counterparty"] = (out.groupby(["customer_id", "counterparty_id"]).cumcount() == 0).astype(int)
         out["first_time_device"] = (out.groupby(["customer_id", "device_id"]).cumcount() == 0).astype(int)
         out["first_time_channel"] = (out.groupby(["customer_id", "channel"]).cumcount() == 0).astype(int)
@@ -82,8 +98,8 @@ class FeatureEngineering:
         out["shared_device_risk"] = (out["shared_device_customer_count"] >= 2).astype(int)
         out["shared_ip_risk"] = (out["shared_ip_customer_count"] >= 2).astype(int)
         out["shared_counterparty_risk"] = (out["shared_counterparty_customer_count"] >= 4).astype(int)
-        out["daily_txn_count"] = out.groupby(["customer_id", out["event_ts"].dt.date])["transaction_id"].transform("count")
-        out["daily_unique_counterparties"] = out.groupby(["customer_id", out["event_ts"].dt.date])["counterparty_id"].transform("nunique")
+        out["daily_txn_count"] = out.groupby(["customer_id", "event_date"])["transaction_id"].transform("count")
+        out["daily_unique_counterparties"] = out.groupby(["customer_id", "event_date"])["counterparty_id"].transform("nunique")
         out["velocity_flag"] = (out["daily_txn_count"] >= 5).astype(int)
         out["fanout_flag"] = (out["daily_unique_counterparties"] >= 3).astype(int)
         out["dormancy_days"] = (out["event_ts"] - out.groupby("customer_id")["event_ts"].shift(1)).dt.total_seconds() / (3600 * 24)
@@ -93,6 +109,12 @@ class FeatureEngineering:
         trans["transition_prob"] = trans["cnt"] / trans["base"]
         out = out.merge(trans[["prev_channel", "channel", "transition_prob"]], on=["prev_channel", "channel"], how="left")
         out["transition_score"] = 1 - out["transition_prob"].fillna(0.5)
+        out["network_overlap_score"] = (
+            0.45 * out["shared_device_risk"].fillna(0)
+            + 0.35 * out["shared_ip_risk"].fillna(0)
+            + 0.20 * out["shared_counterparty_risk"].fillna(0)
+        )
+        out["amount_surprise_score"] = out["cust_amount_zscore"].abs().clip(0, 10).fillna(0) / 10.0
         out["sequence_score"] = (
             0.20 * out["first_time_counterparty"].fillna(0) +
             0.15 * out["first_time_device"].fillna(0) +
@@ -103,5 +125,14 @@ class FeatureEngineering:
             0.10 * out["velocity_flag"].fillna(0) +
             0.15 * out["dormant_activation_flag"].fillna(0)
         )
+        out["behavioral_risk_score"] = (
+            0.30 * out["sequence_score"].fillna(0)
+            + 0.20 * out["transition_score"].fillna(0)
+            + 0.25 * out["network_overlap_score"].fillna(0)
+            + 0.25 * out["amount_surprise_score"].fillna(0)
+        ).clip(0, 1)
+        out["session_sequence_index"] = out.groupby("session_id").cumcount()
+        out["customer_activity_rank"] = out.groupby("customer_id")["amount"].rank(method="first", pct=True)
         out["label"] = out["mule_category"].astype(str)
+        out = out.replace([np.inf, -np.inf], np.nan)
         return out

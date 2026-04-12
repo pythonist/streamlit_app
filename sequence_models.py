@@ -170,6 +170,8 @@ class SequenceModels:
                 values = np.vstack([pad, values])
             seqs.append(values)
             ids.append(entity_id)
+        if not seqs:
+            return np.zeros((0, max_len, len(feature_cols))), []
         return np.array(seqs), ids
 
     def build_transformer_inputs(self, df, feature_cols, entity_col="customer_id", time_col="event_ts", max_len=25):
@@ -188,6 +190,8 @@ class SequenceModels:
             X.append(values)
             masks.append(mask)
             ids.append(entity_id)
+        if not X:
+            return np.zeros((0, max_len, len(feature_cols))), np.zeros((0, max_len)), []
         return np.array(X), np.array(masks), ids
 
     def model5_lstm_and_transformer(self, train_df, valid_df, test_df):

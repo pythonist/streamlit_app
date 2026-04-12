@@ -7,10 +7,12 @@ import time
 import json
 import os
 from pathlib import Path
+import networkx as nx
 import plotly.express as px
 import plotly.graph_objects as go
 
 from config import CONFIG
+from utils import summarize_dataframe
 
 st.set_page_config(
     page_title="PwC Mule Model Studio",
@@ -1191,6 +1193,43 @@ def render_section(title, icon="analytics"):
     """, unsafe_allow_html=True)
 
 
+def render_page_intro(body):
+    theme = current_theme()
+    st.markdown(
+        f"""
+        <div style="margin: -0.15rem 0 1.05rem 0; padding: 0.95rem 1.1rem; border-radius: 16px;
+                    border: 1px solid {theme["line"]}; background: {theme["surface"]};
+                    box-shadow: 0 10px 24px {theme["shadow"]};">
+            <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;
+                        font-weight: 800; color: {PWC_COLORS["primary"]}; margin-bottom: 0.35rem;">
+                Stage guide
+            </div>
+            <div style="font-size: 0.92rem; line-height: 1.65; color: {theme["muted"]};">
+                {body}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_section_note(body):
+    theme = current_theme()
+    st.markdown(
+        f"""
+        <div style="margin: 0.25rem 0 0.9rem 0; padding: 0.8rem 1rem; border-radius: 12px;
+                    border-left: 4px solid {PWC_COLORS["primary"]}; border-top: 1px solid {theme["line"]};
+                    border-right: 1px solid {theme["line"]}; border-bottom: 1px solid {theme["line"]};
+                    background: {theme["surface_soft"]};">
+            <div style="font-size: 0.88rem; line-height: 1.55; color: {theme["muted"]};">
+                {body}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_progress_steps(current, total=8):
     steps_html = ""
     for i in range(1, total + 1):
@@ -1393,6 +1432,493 @@ def render_network_graph(df, ring_df=None):
     """
 
     components.html(graph_html, height=570, scrolling=False)
+
+
+def node_type_from_id(node_id):
+    text = str(node_id)
+    prefix = text.split("::", 1)[0]
+    return {
+        "cust": "Customer",
+        "acct": "Account",
+        "dev": "Device",
+        "ip": "IP",
+        "cp": "Counterparty",
+        "mch": "Merchant",
+    }.get(prefix, prefix.title() if prefix else "Node")
+
+
+def node_id_display(node_id):
+    text = str(node_id)
+    if "::" in text:
+        _, raw = text.split("::", 1)
+        return raw
+    return text
+
+
+def build_interactive_network_figure(df, graph_features=None, ring_df=None, focus_node=None, depth=1, max_nodes=80, color_by="Node Type"):
+    theme = current_theme()
+    graph = nx.Graph()
+    sample = df.head(min(len(df), 800)).copy()
+    prefix_map = {
+        "customer_id": "cust",
+        "account_id": "acct",
+        "counterparty_id": "cp",
+        "device_id": "dev",
+        "merchant_id": "mch",
+        "device_ip_address": "ip",
+        "ip_address": "ip",
+    }
+
+    def node_name(column, value):
+        return f"{prefix_map.get(column, column[:4])}::{value}"
+
+    edge_specs = [
+        ("customer_id", "account_id"),
+        ("account_id", "counterparty_id"),
+        ("customer_id", "device_id"),
+        ("customer_id", "merchant_id"),
+        ("customer_id", "device_ip_address"),
+        ("customer_id", "ip_address"),
+    ]
+
+    for _, row in sample.iterrows():
+        for left, right in edge_specs:
+            if left not in sample.columns or right not in sample.columns:
+                continue
+            u = row.get(left)
+            v = row.get(right)
+            if pd.isna(u) or pd.isna(v):
+                continue
+            u_node = node_name(left, u)
+            v_node = node_name(right, v)
+            if u_node == v_node:
+                continue
+            amount = float(row.get("amount", 1.0) or 1.0)
+            if graph.has_edge(u_node, v_node):
+                graph[u_node][v_node]["weight"] += amount
+            else:
+                graph.add_edge(u_node, v_node, weight=amount)
+
+    if graph.number_of_nodes() == 0:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="No graph data available yet.",
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+            font=dict(color=theme["muted"], size=14),
+        )
+        fig.update_layout(
+            height=520,
+            paper_bgcolor=theme["surface"],
+            plot_bgcolor=theme["surface"],
+            margin=dict(l=20, r=20, t=20, b=20),
+        )
+        return fig
+
+    if focus_node and focus_node in graph:
+        nodes_to_keep = {focus_node}
+        frontier = {focus_node}
+        for _ in range(max(1, int(depth))):
+            next_frontier = set()
+            for node in frontier:
+                next_frontier.update(graph.neighbors(node))
+            next_frontier -= nodes_to_keep
+            nodes_to_keep.update(next_frontier)
+            frontier = next_frontier
+            if not frontier:
+                break
+        graph = graph.subgraph(nodes_to_keep).copy()
+
+    if graph.number_of_nodes() > int(max_nodes):
+        degree_sorted = sorted(graph.degree, key=lambda item: item[1], reverse=True)
+        keep_nodes = [node for node, _ in degree_sorted[: int(max_nodes)]]
+        graph = graph.subgraph(keep_nodes).copy()
+
+    graph_meta = graph_features.set_index("node_id") if isinstance(graph_features, pd.DataFrame) and "node_id" in graph_features.columns else pd.DataFrame()
+    ring_nodes = set()
+    if isinstance(ring_df, pd.DataFrame) and not ring_df.empty and "ring_members" in ring_df.columns:
+        for members in ring_df["ring_members"]:
+            if isinstance(members, str):
+                ring_nodes.update([node.strip() for node in members.split(",") if node.strip()])
+            elif isinstance(members, (list, tuple, set)):
+                ring_nodes.update(map(str, members))
+
+    pos = nx.spring_layout(graph, seed=int(CONFIG.get("random_state", 42)), iterations=60)
+
+    edge_x = []
+    edge_y = []
+    for left, right in graph.edges():
+        x0, y0 = pos[left]
+        x1, y1 = pos[right]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+
+    color_palette = [
+        PWC_COLORS["primary"],
+        PWC_COLORS["accent_teal"],
+        PWC_COLORS["accent_gold"],
+        PWC_COLORS["accent_rose"],
+        PWC_COLORS["info"],
+        PWC_COLORS["success"],
+    ]
+    type_colors = {
+        "Customer": PWC_COLORS["primary"],
+        "Account": PWC_COLORS["accent_teal"],
+        "Device": PWC_COLORS["accent_gold"],
+        "IP": PWC_COLORS["info"],
+        "Counterparty": PWC_COLORS["accent_rose"],
+        "Merchant": PWC_COLORS["success"],
+    }
+
+    node_x = []
+    node_y = []
+    node_text = []
+    node_hover = []
+    node_size = []
+    node_color = []
+
+    for idx, node in enumerate(graph.nodes()):
+        x, y = pos[node]
+        node_x.append(x)
+        node_y.append(y)
+        node_label = node_id_display(node)
+        node_type = node_type_from_id(node)
+        degree = graph.degree(node)
+        meta = graph_meta.loc[node] if node in graph_meta.index else {}
+        pagerank = float(meta.get("graph_pagerank", 0.0)) if isinstance(meta, pd.Series) else 0.0
+        community = int(meta.get("graph_community_id", -1)) if isinstance(meta, pd.Series) and pd.notna(meta.get("graph_community_id", -1)) else -1
+        component_size = int(meta.get("graph_component_size", 1)) if isinstance(meta, pd.Series) and pd.notna(meta.get("graph_component_size", 1)) else 1
+        core_number = int(meta.get("graph_core_number", 0)) if isinstance(meta, pd.Series) and pd.notna(meta.get("graph_core_number", 0)) else 0
+        cycle_flag = int(meta.get("graph_cycle_flag", 0)) if isinstance(meta, pd.Series) and pd.notna(meta.get("graph_cycle_flag", 0)) else 0
+        degree_centrality = float(meta.get("graph_degree_centrality", 0.0)) if isinstance(meta, pd.Series) else 0.0
+        is_ring = node in ring_nodes
+
+        if color_by == "Community" and community >= 0:
+            node_color.append(color_palette[community % len(color_palette)])
+        elif is_ring:
+            node_color.append(PWC_COLORS["accent_rose"])
+        elif color_by == "Node Type":
+            node_color.append(type_colors.get(node_type, theme["muted"]))
+        else:
+            node_color.append(PWC_COLORS["primary"] if degree_centrality >= 0.03 else theme["muted"])
+
+        node_size.append(8 + min(18, max(0, degree * 1.8)))
+        node_text.append(node_label)
+        node_hover.append(
+            f"{node_type}: {node_label}<br>"
+            f"Degree: {degree}<br>"
+            f"Pagerank: {pagerank:.4f}<br>"
+            f"Community: {community if community >= 0 else 'n/a'}<br>"
+            f"Component size: {component_size}<br>"
+            f"Core number: {core_number}<br>"
+            f"Cycle flag: {cycle_flag}<br>"
+            f"Ring member: {'Yes' if is_ring else 'No'}"
+        )
+
+    edge_trace = go.Scatter(
+        x=edge_x,
+        y=edge_y,
+        line=dict(width=0.8, color=theme["graph_edge"]),
+        hoverinfo="none",
+        mode="lines",
+    )
+    node_trace = go.Scatter(
+        x=node_x,
+        y=node_y,
+        mode="markers+text",
+        text=node_text,
+        textposition="top center",
+        hovertemplate="%{customdata}<extra></extra>",
+        customdata=node_hover,
+        marker=dict(
+            size=node_size,
+            color=node_color,
+            line=dict(width=1, color=theme["surface"]),
+            opacity=0.95,
+        ),
+    )
+
+    fig = go.Figure(data=[edge_trace, node_trace])
+    fig.update_layout(
+        height=560,
+        showlegend=False,
+        hovermode="closest",
+        paper_bgcolor=theme["surface"],
+        plot_bgcolor=theme["surface"],
+        margin=dict(l=20, r=20, t=20, b=20),
+        xaxis=dict(showgrid=False, zeroline=False, visible=False),
+        yaxis=dict(showgrid=False, zeroline=False, visible=False),
+        font=dict(color=theme["text"]),
+    )
+    return fig
+
+
+def summarize_numeric_frame(df, numeric_cols=None, top_n=12):
+    if df is None or df.empty:
+        return []
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    summary = []
+    for col in numeric_cols[:top_n]:
+        series = pd.to_numeric(df[col], errors="coerce")
+        summary.append(
+            {
+                "feature": col,
+                "mean": float(series.mean()) if series.notna().any() else 0.0,
+                "median": float(series.median()) if series.notna().any() else 0.0,
+                "std": float(series.std()) if series.notna().any() else 0.0,
+                "missing_pct": float(series.isna().mean() * 100),
+            }
+        )
+    return summary
+
+
+def infer_feature_role(column_name, dtype_str=""):
+    name = str(column_name).lower()
+    dtype_str = str(dtype_str).lower()
+    if name in {"label", "mule_category"}:
+        return "Target"
+    if name.startswith("graph_") or "_graph_" in name:
+        return "Graph"
+    if any(token in name for token in ["sequence", "transition", "velocity", "dormant", "fanout", "shared", "first_time", "behavioral", "hazard", "hmm", "ring"]):
+        return "Behavioral"
+    if name.startswith("prob_") or "score" in name:
+        return "Risk Score"
+    if any(token in name for token in ["event_ts", "timestamp", "date", "time"]):
+        return "Datetime"
+    if any(token in name for token in ["_id", "email", "phone", "address", "hash", "name", "number"]):
+        return "Identifier / PII"
+    if "int" in dtype_str or "float" in dtype_str or "bool" in dtype_str:
+        return "Numeric"
+    return "Categorical"
+
+
+def describe_feature(column_name):
+    name = str(column_name).lower()
+    exact_map = {
+        "label": "Ground-truth mule class used for training and evaluation.",
+        "mule_category": "Synthetic target class generated during data creation.",
+        "amount": "Transaction value for the event.",
+        "event_ts": "Timestamp when the transaction or login event occurred.",
+        "channel": "Source channel for the event such as UPI, ATM, BRANCH, MERCHANT, API, or DIGITAL.",
+        "transaction_type": "Transaction action or subtype recorded for the event.",
+        "transaction_status": "Raw status or response code for the event.",
+        "customer_id": "Customer identifier used to group activity and build customer-level sequences.",
+        "account_id": "Account identifier linked to the transaction.",
+        "device_id": "Device identifier used to analyze device reuse and shared-device behavior.",
+        "counterparty_id": "Counterparty or beneficiary identifier used for fan-out and transfer analysis.",
+        "merchant_id": "Merchant identifier associated with payment or cashout activity.",
+        "graph_pagerank": "Relative network influence score from graph analytics.",
+        "graph_degree_centrality": "Normalized number of direct connections in the graph.",
+        "graph_clustering": "Local clustering coefficient showing whether neighbors are interconnected.",
+        "graph_community_id": "Community assignment from connected components in the graph.",
+        "graph_cycle_flag": "Indicator showing whether the node belongs to a cyclic or ring-like component.",
+        "ring_count": "Number of detected ring structures linked to the row.",
+        "ring_max_risk_score": "Highest risk score among detected rings linked to the row.",
+        "sequence_score": "Aggregated behavioral risk score based on first-time, velocity, fan-out, and dormancy signals.",
+        "behavioral_risk_score": "Combined behavioral risk score that blends sequence, transition, network, and amount anomalies.",
+        "transition_score": "Unusual channel transition score derived from historical channel-to-channel flow.",
+        "hazard_score": "Sequence hazard score from the temporal risk model.",
+        "hmm_sequence_anomaly_score": "Anomaly score from the HMM-based sequential model.",
+        "final_mule_score": "Final alerting score used to rank and tier alerts.",
+        "risk_tier": "Low, medium, or high tier derived from the final score.",
+        "priority_band": "Operational alert band used for triage prioritization.",
+    }
+    if name in exact_map:
+        return exact_map[name]
+    if name.startswith("prob_"):
+        return "Model probability for the corresponding class."
+    if "customer" in name and "count" in name:
+        return "Customer count signal derived from grouped activity."
+    if "device" in name and "count" in name:
+        return "Device count signal derived from grouped activity."
+    if "ip" in name and "count" in name:
+        return "IP sharing signal derived from grouped activity."
+    if "counterparty" in name and "count" in name:
+        return "Counterparty sharing signal derived from grouped activity."
+    if "first_time" in name:
+        return "Flag showing whether this is the first observed interaction for the entity combination."
+    if "shared" in name:
+        return "Shared-entity signal used to detect reuse across multiple customers."
+    if "dormant" in name:
+        return "Dormancy or reactivation signal that can indicate mule activation behavior."
+    if "velocity" in name:
+        return "Transaction velocity signal derived from burst activity in a short time window."
+    if "fanout" in name:
+        return "Fan-out signal showing distribution to multiple counterparties."
+    if "session" in name:
+        return "Session-level feature used to capture grouped activity over time."
+    if "time" in name or "date" in name or "timestamp" in name:
+        return "Time-based feature used for sequencing and time-window analysis."
+    if "amount" in name:
+        return "Amount-based feature used for value and outlier analysis."
+    if "score" in name:
+        return "Derived risk score used to surface suspicious behavior."
+    if "_id" in name:
+        return "Identifier column used for joins, grouping, or traceability."
+    return "Engineered feature used in the mule risk pipeline."
+
+
+def build_feature_store_table(df, limit=300):
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["feature", "dtype", "role", "description", "missing_pct", "unique", "sample_value"])
+
+    rows = []
+    for col in df.columns[:limit]:
+        series = df[col]
+        dtype_str = str(series.dtype)
+        non_null = series.dropna()
+        sample_value = ""
+        if len(non_null) > 0:
+            sample_value = str(non_null.iloc[0])
+            if len(sample_value) > 80:
+                sample_value = sample_value[:77] + "..."
+        rows.append(
+            {
+                "feature": col,
+                "dtype": dtype_str,
+                "role": infer_feature_role(col, dtype_str),
+                "description": describe_feature(col),
+                "missing_pct": round(float(series.isna().mean() * 100), 2),
+                "unique": int(series.nunique(dropna=True)),
+                "sample_value": sample_value,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def render_eda_snapshot(df, title="EDA Snapshot"):
+    if df is None or df.empty:
+        st.info("Run EDA and imputation to see the snapshot.")
+        return
+
+    render_section(title, "analytics")
+    render_section_note("Use the tabs to review data quality first, then inspect distributions and the feature inventory before moving into model training.")
+    cols = st.columns(4)
+    with cols[0]:
+        render_kpi("dataset", "Rows", f"{len(df):,}", "", "orange")
+    with cols[1]:
+        render_kpi("view_column", "Columns", f"{df.shape[1]:,}", "", "teal")
+    with cols[2]:
+        missing_pct = round(float(df.isna().mean().mean() * 100), 2) if len(df.columns) else 0.0
+        render_kpi("report", "Avg Missing", f"{missing_pct:.1f}%", "", "gold")
+    with cols[3]:
+        numeric_count = len(df.select_dtypes(include=[np.number]).columns)
+        render_kpi("functions", "Numeric", f"{numeric_count:,}", "", "green")
+
+    eda_tab1, eda_tab2, eda_tab3 = st.tabs(["Data Quality", "Distributions", "Feature Store"])
+
+    with eda_tab1:
+        quality_cols = st.columns([1.0, 1.2])
+        with quality_cols[0]:
+            missing_cols = df.isna().mean().sort_values(ascending=False).head(20).reset_index()
+            missing_cols.columns = ["Column", "Missing %"]
+            missing_cols["Missing %"] = (missing_cols["Missing %"] * 100).round(2)
+            fig = px.bar(missing_cols, x="Column", y="Missing %", title="Top missing columns")
+            fig = apply_dark_theme(fig)
+            fig.update_layout(height=360, showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+        with quality_cols[1]:
+            summary = summarize_dataframe(df, max_numeric_cols=12)
+            if not summary.empty:
+                st.dataframe(summary.round(4), use_container_width=True, height=360)
+            else:
+                st.info("No numeric columns available for a quick summary.")
+
+    with eda_tab2:
+        dist_cols = st.columns([1.0, 1.0])
+        with dist_cols[0]:
+            if "channel" in df.columns:
+                channel_df = df["channel"].astype(str).value_counts().reset_index()
+                channel_df.columns = ["Channel", "Count"]
+                fig = px.bar(channel_df, x="Channel", y="Count", color="Channel", title="Channel distribution")
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=340, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+            if "mule_category" in df.columns:
+                category_df = df["mule_category"].astype(str).value_counts().reset_index().head(15)
+                category_df.columns = ["Category", "Count"]
+                fig = px.bar(category_df, x="Category", y="Count", color="Category", title="Category distribution")
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=340, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+        with dist_cols[1]:
+            if "amount" in df.columns:
+                sample_size = min(len(df), 4000)
+                amount_sample = df[["amount"]].sample(sample_size, random_state=CONFIG["random_state"]) if len(df) > sample_size else df[["amount"]]
+                fig = px.histogram(amount_sample, x="amount", nbins=40, title="Amount distribution")
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=340)
+                st.plotly_chart(fig, use_container_width=True)
+            if "event_ts" in df.columns:
+                ts = pd.to_datetime(df["event_ts"], errors="coerce").dropna()
+                if len(ts) > 0:
+                    ts_df = ts.dt.floor("D").value_counts().sort_index().reset_index()
+                    ts_df.columns = ["Date", "Count"]
+                    fig = px.line(ts_df, x="Date", y="Count", markers=True, title="Activity by day")
+                    fig = apply_dark_theme(fig)
+                    fig.update_layout(height=340)
+                    st.plotly_chart(fig, use_container_width=True)
+
+    with eda_tab3:
+        with st.expander("Feature Store", expanded=True):
+            render_section_note("Each row explains the feature role, data type, missingness, uniqueness, and a sample value for quick review.")
+            store_df = build_feature_store_table(df)
+            store_cols = st.columns([1.0, 0.9, 1.0])
+            with store_cols[0]:
+                search = st.text_input("Search feature", value="", key="eda_feature_store_search")
+            with store_cols[1]:
+                role_filter = st.multiselect(
+                    "Role",
+                    options=sorted(store_df["role"].unique().tolist()),
+                    default=sorted(store_df["role"].unique().tolist()),
+                    key="eda_feature_store_role",
+                )
+            with store_cols[2]:
+                max_rows = st.slider("Rows", 25, 300, 120, step=25, key="eda_feature_store_rows")
+
+            view = store_df.copy()
+            if search:
+                view = view[view["feature"].str.contains(search, case=False, na=False)]
+            if role_filter:
+                view = view[view["role"].isin(role_filter)]
+
+            role_counts = view["role"].value_counts().reset_index()
+            role_counts.columns = ["Role", "Count"]
+            if len(role_counts) > 0:
+                fig = px.bar(role_counts, x="Role", y="Count", color="Role", title="Feature roles")
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=300, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+
+            selected_feature = st.selectbox(
+                "Inspect feature",
+                options=view["feature"].tolist()[:max_rows] if len(view) > 0 else [],
+                index=0 if len(view) > 0 else None,
+                key="eda_feature_store_inspect",
+            ) if len(view) > 0 else None
+
+            if selected_feature:
+                selected_row = view[view["feature"] == selected_feature].iloc[0]
+                info_cols = st.columns(4)
+                with info_cols[0]:
+                    render_kpi("view_column", "Role", selected_row["role"], "", "orange")
+                with info_cols[1]:
+                    render_kpi("description", "Type", selected_row["dtype"], "", "teal")
+                with info_cols[2]:
+                    render_kpi("report", "Missing", f'{selected_row["missing_pct"]:.2f}%', "", "gold")
+                with info_cols[3]:
+                    render_kpi("dataset", "Unique", f'{selected_row["unique"]:,}', "", "green")
+
+                with st.expander("Feature description", expanded=True):
+                    st.write(selected_row["description"])
+                    st.caption(f"Sample value: {selected_row['sample_value']}")
+
+            st.dataframe(view.head(max_rows), use_container_width=True, height=360)
+
 
 def apply_demo_profile(profile_name):
     profile = CONFIG.get("demo_profiles", {}).get(profile_name)
@@ -1904,8 +2430,10 @@ def page_data_generation():
 
     render_top_bar("Data Generation", "Generate synthetic banking data for mule detection analysis", stats)
     render_progress_steps(1)
+    render_page_intro("Set the synthetic population size, seed, and record ranges, then inspect the raw and transaction tables that feed every downstream stage.")
 
     render_section("Configuration", "settings")
+    render_section_note("Tune the synthetic population and record scale before generating the source tables.")
 
     entity_counts = CONFIG.get("entity_counts", {})
     col1, col2, col3, col4, col5, col6 = st.columns(6)
@@ -1974,9 +2502,29 @@ def page_data_generation():
             render_kpi("view_column", "Total Columns", f"{total_cols}", "", "rose")
 
         render_section("Table Explorer", "table_chart")
+        render_section_note("Use the tabs to inspect preview rows, schema, and aggregate statistics for each raw or transaction table.")
 
         all_tables = {**raw_tables, **txn_tables}
-        selected = st.selectbox("Select table", list(all_tables.keys()), label_visibility="collapsed")
+        explorer_cols = st.columns([1.0, 1.0, 1.0])
+        with explorer_cols[0]:
+            table_query = st.text_input("Search table", value="")
+        with explorer_cols[1]:
+            table_kind = st.selectbox("Table kind", ["All", "Raw", "Txn"])
+        with explorer_cols[2]:
+            preview_rows = st.slider("Preview rows", 25, 300, 100, step=25)
+
+        table_names = list(all_tables.keys())
+        if table_kind == "Raw":
+            table_names = list(raw_tables.keys())
+        elif table_kind == "Txn":
+            table_names = list(txn_tables.keys())
+        if table_query:
+            table_names = [name for name in table_names if table_query.lower() in name.lower()]
+        if not table_names:
+            st.info("No tables match the current filter.")
+            return
+
+        selected = st.selectbox("Select table", table_names, label_visibility="collapsed")
 
         if selected:
             df = all_tables[selected]
@@ -1984,7 +2532,20 @@ def page_data_generation():
             tab1, tab2, tab3 = st.tabs(["Preview", "Schema", "Statistics"])
 
             with tab1:
-                st.dataframe(df.head(200), use_container_width=True, height=400)
+                st.dataframe(df.head(preview_rows), use_container_width=True, height=400)
+                if "amount" in df.columns:
+                    amount_col1, amount_col2 = st.columns(2)
+                    with amount_col1:
+                        fig = px.histogram(df.sample(min(len(df), 2000), random_state=CONFIG["random_state"]), x="amount", nbins=40, title=f"{selected} amount distribution")
+                        fig = apply_dark_theme(fig)
+                        fig.update_layout(height=300)
+                        st.plotly_chart(fig, use_container_width=True)
+                    with amount_col2:
+                        if "channel" in df.columns:
+                            fig = px.box(df, x="channel", y="amount", color="channel", title=f"{selected} amount by channel")
+                            fig = apply_dark_theme(fig)
+                            fig.update_layout(height=300, showlegend=False)
+                            st.plotly_chart(fig, use_container_width=True)
 
             with tab2:
                 schema = pd.DataFrame({
@@ -1997,17 +2558,24 @@ def page_data_generation():
                 st.dataframe(schema, use_container_width=True, height=400)
 
             with tab3:
-                st.dataframe(df.describe().transpose().round(4), use_container_width=True, height=400)
+                summary = df.describe(include="all").transpose().fillna("")
+                st.dataframe(summary.round(4), use_container_width=True, height=400)
+                numeric_summary = summarize_numeric_frame(df)
+                if numeric_summary:
+                    st.dataframe(pd.DataFrame(numeric_summary).round(4), use_container_width=True, height=220)
 
 
 def page_entity_resolution():
     render_top_bar("Entity Resolution", "Build entity views, unified events, and customer single view")
     render_progress_steps(2)
+    render_page_intro("We resolve customers, accounts, devices, merchants, and counterparties into reusable entity views, then stitch them into a unified event stream and a single customer-level view.")
 
     if st.session_state.raw_tables is None:
         st.warning("Complete Step 1 first: Generate Data")
         return
 
+    render_section("Build Pipeline", "play_arrow")
+    render_section_note("Run the three actions in order so the entity views, unified events, and single view stay aligned.")
     col1, col2, col3 = st.columns(3)
 
     with col1:
@@ -2055,6 +2623,7 @@ def page_entity_resolution():
 
     if st.session_state.entity_views is not None:
         render_section("Entity Views", "hub")
+        render_section_note("These cards summarize the normalized entity tables created from the raw source data.")
 
         cols = st.columns(len(st.session_state.entity_views))
         for i, (name, df) in enumerate(st.session_state.entity_views.items()):
@@ -2064,6 +2633,7 @@ def page_entity_resolution():
 
     if st.session_state.events is not None:
         render_section("Unified Events", "timeline")
+        render_section_note("The unified stream combines the resolved entities into a single activity feed for downstream analysis.")
 
         ev = st.session_state.events
         col1, col2, col3 = st.columns(3)
@@ -2087,19 +2657,86 @@ def page_entity_resolution():
             fig.update_layout(showlegend=False, height=350, title="Events by Channel")
             st.plotly_chart(fig, use_container_width=True)
 
+        event_controls = st.columns([1.0, 1.0, 1.0])
+        with event_controls[0]:
+            top_customers = []
+            if "customer_id" in ev.columns:
+                top_customers = ev["customer_id"].astype(str).value_counts().head(100).index.tolist()
+            selected_customer = st.selectbox("Inspect customer", ["All customers"] + top_customers if top_customers else ["All customers"])
+        with event_controls[1]:
+            channel_options = ["All channels"]
+            if "channel" in ev.columns:
+                channel_options += sorted(ev["channel"].astype(str).unique().tolist())
+            selected_channel = st.selectbox("Channel", channel_options)
+        with event_controls[2]:
+            event_window = st.slider("Recent rows", 25, 500, 100, step=25)
+
+        event_view = ev.copy()
+        if selected_customer != "All customers" and "customer_id" in event_view.columns:
+            event_view = event_view[event_view["customer_id"].astype(str) == str(selected_customer)]
+        if selected_channel != "All channels" and "channel" in event_view.columns:
+            event_view = event_view[event_view["channel"].astype(str) == str(selected_channel)]
+
+        if not event_view.empty:
+            drill_col1, drill_col2 = st.columns(2)
+            with drill_col1:
+                if "event_ts" in event_view.columns:
+                    ts_view = event_view.copy()
+                    ts_view["event_day"] = pd.to_datetime(ts_view["event_ts"]).dt.floor("D")
+                    if "channel" in ts_view.columns:
+                        daily = ts_view.groupby(["event_day", "channel"]).size().reset_index(name="Count")
+                        fig = px.line(daily, x="event_day", y="Count", color="channel", markers=True, title="Daily event activity")
+                    else:
+                        daily = ts_view.groupby("event_day").size().reset_index(name="Count")
+                        fig = px.line(daily, x="event_day", y="Count", markers=True, title="Daily event activity")
+                    fig = apply_dark_theme(fig)
+                    fig.update_layout(height=360)
+                    st.plotly_chart(fig, use_container_width=True)
+            with drill_col2:
+                if "amount" in event_view.columns:
+                    fig = px.histogram(event_view, x="amount", nbins=40, title="Event amount distribution")
+                    fig = apply_dark_theme(fig)
+                    fig.update_layout(height=360)
+                    st.plotly_chart(fig, use_container_width=True)
+
+            if "counterparty_id" in event_view.columns:
+                counterparty_counts = event_view["counterparty_id"].astype(str).value_counts().head(12).reset_index()
+                counterparty_counts.columns = ["Counterparty", "Count"]
+                fig = px.bar(counterparty_counts, x="Counterparty", y="Count", title="Top counterparties")
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=330, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.dataframe(event_view.head(event_window), use_container_width=True, height=280)
+
     if st.session_state.single_view is not None:
         render_section("Single View Preview", "table_chart")
-        st.dataframe(st.session_state.single_view.head(100), use_container_width=True, height=300)
+        render_section_note("This flattened customer view is the feature-ready dataset that feeds the next stage.")
+        single_view = st.session_state.single_view
+        sv_col1, sv_col2 = st.columns([1.0, 1.0])
+        with sv_col1:
+            sv_query = st.text_input("Search single view columns", value="")
+        with sv_col2:
+            sv_rows = st.slider("Single view rows", 25, 250, 100, step=25)
+        filtered_sv = single_view
+        if sv_query:
+            keep_cols = [c for c in single_view.columns if sv_query.lower() in c.lower()]
+            if keep_cols:
+                filtered_sv = single_view[keep_cols]
+        st.dataframe(filtered_sv.head(sv_rows), use_container_width=True, height=300)
 
 
 def page_feature_engineering():
     render_top_bar("Feature Engineering", "EDA, imputation, and advanced feature generation")
     render_progress_steps(3)
+    render_page_intro("Clean the single view, inspect missingness and distributions, then turn the resolved activity into model-ready features.")
 
     if st.session_state.single_view is None:
         st.warning("Complete Step 2 first: Entity Resolution")
         return
 
+    render_section("Run Controls", "tune")
+    render_section_note("Run EDA first to understand data quality, then generate engineered features from the cleaned single view.")
     col1, col2 = st.columns(2)
 
     with col1:
@@ -2126,12 +2763,16 @@ def page_feature_engineering():
                     feat = FeatureEngineering()
                     feature_df = feat.feature_engineering(st.session_state.clean_df)
                     st.session_state.step_times["Features"] = time.time() - start
-                    st.session_state.feature_df = feature_df
-                    st.session_state.current_step = max(st.session_state.current_step, 3)
-                st.rerun()
+                st.session_state.feature_df = feature_df
+                st.session_state.current_step = max(st.session_state.current_step, 3)
+            st.rerun()
+
+    if st.session_state.clean_df is not None:
+        render_eda_snapshot(st.session_state.clean_df, "EDA Results")
 
     if st.session_state.feature_df is not None:
         df = st.session_state.feature_df
+        render_section_note("Preview the engineered dataframe, inspect distributions, and browse the feature catalog before training the model.")
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -2143,21 +2784,26 @@ def page_feature_engineering():
         with col4:
             render_kpi("data_array", "Records", f"{df.shape[0]:,}", "", "green")
 
-        tab1, tab2, tab3 = st.tabs(["Data Preview", "Feature Distributions", "Label Analysis"])
+        tab1, tab2, tab3, tab4 = st.tabs(["Data Preview", "Feature Distributions", "Label Analysis", "Feature Store"])
 
         with tab1:
+            st.caption("Inspect the engineered dataframe directly before drilling into distributions and store metadata.")
             st.dataframe(df.head(200), use_container_width=True, height=400)
 
         with tab2:
+            st.caption("Look at one numeric feature at a time to check shape, spread, and outliers.")
             num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            sel = st.selectbox("Select feature", num_cols[:50])
+            sel_options = num_cols[:40]
+            sel = st.selectbox("Select feature", sel_options) if sel_options else None
             if sel:
-                fig = px.histogram(df, x=sel, nbins=50, color_discrete_sequence=[PWC_COLORS["primary"]])
+                hist_sample = df[[sel]].sample(min(len(df), 4000), random_state=CONFIG["random_state"]) if len(df) > 4000 else df[[sel]]
+                fig = px.histogram(hist_sample, x=sel, nbins=50, color_discrete_sequence=[PWC_COLORS["primary"]])
                 fig = apply_dark_theme(fig)
                 fig.update_layout(height=400, title=f"Distribution: {sel}")
                 st.plotly_chart(fig, use_container_width=True)
 
         with tab3:
+            st.caption("Compare label mix and amount behavior to see whether the classes separate cleanly.")
             if "label" in df.columns:
                 col1, col2 = st.columns(2)
                 with col1:
@@ -2170,21 +2816,190 @@ def page_feature_engineering():
 
                 with col2:
                     if "amount" in df.columns:
-                        fig = px.box(df, x="label", y="amount", color="label")
+                        amount_sample = df[["label", "amount"]].sample(min(len(df), 4000), random_state=CONFIG["random_state"]) if len(df) > 4000 else df[["label", "amount"]]
+                        fig = px.box(amount_sample, x="label", y="amount", color="label")
                         fig = apply_dark_theme(fig)
                         fig.update_layout(height=400, showlegend=False, title="Amount by Label")
                         st.plotly_chart(fig, use_container_width=True)
+
+        render_section("Interactive Feature Lens", "travel_explore")
+        render_section_note("Filter the engineered dataset by label, channel, and amount range, then inspect correlation and trend patterns.")
+        lens_top = st.columns([1.1, 1.0, 1.0])
+
+        label_filter = []
+        channel_filter = []
+        amount_window = None
+        if "label" in df.columns:
+            with lens_top[0]:
+                label_filter = st.multiselect(
+                    "Filter labels",
+                    options=sorted(df["label"].astype(str).unique().tolist()),
+                    default=sorted(df["label"].astype(str).unique().tolist())[:4],
+                )
+        elif "channel" in df.columns:
+            with lens_top[0]:
+                channel_filter = st.multiselect(
+                    "Filter channels",
+                    options=sorted(df["channel"].astype(str).unique().tolist()),
+                    default=sorted(df["channel"].astype(str).unique().tolist())[:4],
+                )
+
+        if "amount" in df.columns:
+            with lens_top[1]:
+                amount_window = st.slider(
+                    "Amount range",
+                    float(df["amount"].min()),
+                    float(df["amount"].max()),
+                    (float(df["amount"].quantile(0.05)), float(df["amount"].quantile(0.95))),
+                )
+
+        trend_metric_options = [c for c in ["amount", "cust_amount_zscore", "hours_since_prev_txn", "sequence_score", "ring_max_risk_score"] if c in df.columns]
+        trend_metric = None
+        if trend_metric_options:
+            with lens_top[2]:
+                trend_metric = st.selectbox("Trend metric", trend_metric_options, index=0)
+
+        filtered = df.copy()
+        if label_filter:
+            filtered = filtered[filtered["label"].astype(str).isin(label_filter)]
+        if channel_filter and "channel" in filtered.columns:
+            filtered = filtered[filtered["channel"].astype(str).isin(channel_filter)]
+        if amount_window and "amount" in filtered.columns:
+            filtered = filtered[(filtered["amount"] >= amount_window[0]) & (filtered["amount"] <= amount_window[1])]
+
+        if "event_ts" in filtered.columns and trend_metric:
+            trend_df = filtered.copy()
+            trend_df["event_day"] = pd.to_datetime(trend_df["event_ts"]).dt.floor("D")
+            if "label" in trend_df.columns and trend_df["label"].nunique() <= 8:
+                trend = trend_df.groupby(["event_day", "label"])[trend_metric].mean().reset_index()
+                fig = px.line(trend, x="event_day", y=trend_metric, color="label", markers=True)
+            elif "channel" in trend_df.columns and trend_df["channel"].nunique() <= 8:
+                trend = trend_df.groupby(["event_day", "channel"])[trend_metric].mean().reset_index()
+                fig = px.line(trend, x="event_day", y=trend_metric, color="channel", markers=True)
+            else:
+                trend = trend_df.groupby("event_day")[trend_metric].mean().reset_index()
+                fig = px.line(trend, x="event_day", y=trend_metric, markers=True)
+            fig = apply_dark_theme(fig)
+            fig.update_layout(height=380, title=f"{trend_metric} trend")
+            st.plotly_chart(fig, use_container_width=True)
+
+        lens_col1, lens_col2 = st.columns(2)
+        with lens_col1:
+            num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            corr_defaults = [c for c in ["amount", "cust_amount_zscore", "sequence_score", "ring_max_risk_score", "hours_since_prev_txn"] if c in num_cols]
+            corr_defaults = [c for c in corr_defaults if c in num_cols]
+            if not corr_defaults:
+                corr_defaults = num_cols[: min(8, len(num_cols))]
+            corr_choices = st.multiselect(
+                "Correlation features",
+                options=num_cols[:40],
+                default=corr_defaults,
+            )
+            if len(corr_choices) >= 2:
+                corr = filtered[corr_choices].corr().round(2)
+                fig = px.imshow(
+                    corr,
+                    text_auto=True,
+                    color_continuous_scale=[[0, "#F7E6DA"], [0.5, "#D04A02"], [1, "#FFB600"]],
+                    title="Feature correlation",
+                )
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=520)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Choose at least two numeric features for correlation view.")
+
+        with lens_col2:
+            scatter_x = "amount" if "amount" in filtered.columns else None
+            scatter_y = "cust_amount_zscore" if "cust_amount_zscore" in filtered.columns else None
+            if scatter_x and scatter_y:
+                point_color = "label" if "label" in filtered.columns else ("channel" if "channel" in filtered.columns else None)
+                sample_size = min(len(filtered), 2000)
+                plot_df = filtered.sample(sample_size, random_state=CONFIG["random_state"]) if len(filtered) > sample_size else filtered
+                fig = px.scatter(
+                    plot_df,
+                    x=scatter_x,
+                    y=scatter_y,
+                    color=point_color,
+                    hover_data=[c for c in ["customer_id", "account_id", "channel", "label", "sequence_score"] if c in plot_df.columns],
+                    title="Amount vs behavioural z-score",
+                    opacity=0.7,
+                )
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=520)
+                st.plotly_chart(fig, use_container_width=True)
+
+        st.caption(f"Filtered rows: {len(filtered):,} of {len(df):,}")
+        st.dataframe(filtered.head(200), use_container_width=True, height=280)
+
+    with tab4:
+            with st.expander("Feature Store", expanded=True):
+                st.caption("Browse the feature catalog, its role in the pipeline, and a short explanation of what each column represents.")
+                feature_store_df = build_feature_store_table(df)
+                store_filter_cols = st.columns([1.0, 0.9, 0.9])
+                with store_filter_cols[0]:
+                    store_search = st.text_input("Search feature", value="", key="feature_store_search")
+                with store_filter_cols[1]:
+                    store_roles = st.multiselect(
+                        "Role",
+                        options=sorted(feature_store_df["role"].unique().tolist()),
+                        default=sorted(feature_store_df["role"].unique().tolist()),
+                        key="feature_store_roles",
+                    )
+                with store_filter_cols[2]:
+                    store_rows = st.slider("Rows", 25, 300, 120, step=25, key="feature_store_rows")
+
+                store_view = feature_store_df.copy()
+                if store_search:
+                    store_view = store_view[store_view["feature"].str.contains(store_search, case=False, na=False)]
+                if store_roles:
+                    store_view = store_view[store_view["role"].isin(store_roles)]
+
+                role_counts = store_view["role"].value_counts().reset_index()
+                role_counts.columns = ["Role", "Count"]
+                if not role_counts.empty:
+                    fig = px.bar(role_counts, x="Role", y="Count", color="Role", title="Feature roles")
+                    fig = apply_dark_theme(fig)
+                    fig.update_layout(height=300, showlegend=False)
+                    st.plotly_chart(fig, use_container_width=True)
+
+                selected_feature = st.selectbox(
+                    "Inspect feature",
+                    options=store_view["feature"].tolist()[:store_rows] if len(store_view) > 0 else [],
+                    index=0 if len(store_view) > 0 else None,
+                    key="feature_store_inspect",
+                ) if len(store_view) > 0 else None
+
+                if selected_feature:
+                    selected_row = store_view[store_view["feature"] == selected_feature].iloc[0]
+                    info_cols = st.columns(4)
+                    with info_cols[0]:
+                        render_kpi("view_column", "Role", selected_row["role"], "", "orange")
+                    with info_cols[1]:
+                        render_kpi("description", "Type", selected_row["dtype"], "", "teal")
+                    with info_cols[2]:
+                        render_kpi("report", "Missing", f'{selected_row["missing_pct"]:.2f}%', "", "gold")
+                    with info_cols[3]:
+                        render_kpi("dataset", "Unique", f'{selected_row["unique"]:,}', "", "green")
+
+                    with st.expander("Feature description", expanded=True):
+                        st.write(selected_row["description"])
+                        st.caption(f"Sample value: {selected_row['sample_value']}")
+
+                st.dataframe(store_view.head(store_rows), use_container_width=True, height=360)
 
 
 def page_graph_analytics():
     render_top_bar("Graph Analytics", "Network analysis, community detection, and mule ring identification")
     render_progress_steps(4)
+    render_page_intro("Build the transaction graph, surface dense communities and cycles, and inspect suspicious rings through an interactive network explorer.")
 
     if st.session_state.feature_df is None:
         st.warning("Complete Step 3 first: Feature Engineering")
         return
 
     render_section("Configuration", "tune")
+    render_section_note("Set the graph sample size and ring search bounds before running community detection and cycle analysis.")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -2248,36 +3063,146 @@ def page_graph_analytics():
 
     if st.session_state.graph_feature_df is not None:
         render_section("Network Visualization", "share")
+        render_section_note("This overview shows how customers, accounts, and counterparties connect across the sampled network.")
         render_network_graph(st.session_state.graph_feature_df, st.session_state.ring_df)
+
+        if st.session_state.graph_features is not None and isinstance(st.session_state.graph_features, pd.DataFrame) and len(st.session_state.graph_features) > 0:
+            render_section("Interactive Network Explorer", "travel_explore")
+            render_section_note("Focus a node to change the neighborhood depth, node cap, and color encoding.")
+            gf = st.session_state.graph_features.copy()
+            top_nodes = gf.sort_values(
+                ["graph_pagerank", "graph_degree_centrality"],
+                ascending=[False, False],
+            )["node_id"].head(120).tolist()
+            focus_col1, focus_col2, focus_col3 = st.columns([1.4, 0.7, 0.7])
+            with focus_col1:
+                focus_node = st.selectbox("Focus node", ["All nodes"] + top_nodes)
+            with focus_col2:
+                depth = st.slider("Neighborhood depth", 1, 2, 1)
+            with focus_col3:
+                node_cap = st.slider("Node cap", 30, 150, 80, step=10)
+            color_by = st.selectbox("Color by", ["Node Type", "Community", "Risk"], index=0)
+            selected_focus = None if focus_node == "All nodes" else focus_node
+            explorer_fig = build_interactive_network_figure(
+                st.session_state.graph_feature_df,
+                gf,
+                st.session_state.ring_df,
+                focus_node=selected_focus,
+                depth=depth,
+                max_nodes=node_cap,
+                color_by=color_by,
+            )
+            st.plotly_chart(
+                explorer_fig,
+                use_container_width=True,
+                config={"displayModeBar": True, "scrollZoom": True, "responsive": True},
+            )
+
+            metric_cols = st.columns(4)
+            with metric_cols[0]:
+                render_kpi("hub", "Top Pagerank", f"{gf['graph_pagerank'].max():.4f}" if "graph_pagerank" in gf.columns else "Pending", "", "orange")
+            with metric_cols[1]:
+                render_kpi("share", "Avg Component", f"{gf['graph_component_size'].mean():.1f}" if "graph_component_size" in gf.columns else "Pending", "", "teal")
+            with metric_cols[2]:
+                render_kpi("speed", "Core Max", f"{int(gf['graph_core_number'].max())}" if "graph_core_number" in gf.columns else "Pending", "", "gold")
+            with metric_cols[3]:
+                ring_nodes = 0
+                if st.session_state.ring_df is not None and isinstance(st.session_state.ring_df, pd.DataFrame) and len(st.session_state.ring_df) > 0 and "ring_members" in st.session_state.ring_df.columns:
+                    ring_nodes = len(
+                        {
+                            str(node)
+                            for members in st.session_state.ring_df["ring_members"]
+                            for node in (members if isinstance(members, (list, tuple, set)) else str(members).split(","))
+                        }
+                    )
+                render_kpi("warning", "Ring Nodes", f"{ring_nodes:,}" if ring_nodes else "Pending", "", "red")
 
     if st.session_state.ring_df is not None and isinstance(st.session_state.ring_df, pd.DataFrame) and len(st.session_state.ring_df) > 0:
         render_section("Detected Rings", "toll")
+        render_section_note("Filter ring candidates by size and risk to inspect the strongest suspicious structures first.")
 
         ring_df = st.session_state.ring_df
+        ring_controls = st.columns([1.0, 1.0, 1.0])
+        with ring_controls[0]:
+            min_members = st.slider(
+                "Minimum members",
+                3,
+                int(ring_df["ring_member_count"].max()) if "ring_member_count" in ring_df.columns else 3,
+                3,
+            )
+        with ring_controls[1]:
+            min_risk = st.slider("Minimum risk", 0.0, 1.0, 0.35, 0.05)
+        with ring_controls[2]:
+            ring_kind = st.multiselect(
+                "Ring type",
+                options=sorted(ring_df["ring_type"].astype(str).unique().tolist()) if "ring_type" in ring_df.columns else ["cycle"],
+                default=sorted(ring_df["ring_type"].astype(str).unique().tolist()) if "ring_type" in ring_df.columns else ["cycle"],
+            )
 
-        col1, col2 = st.columns(2)
-        with col1:
-            if "ring_member_count" in ring_df.columns:
-                fig = px.histogram(ring_df, x="ring_member_count", nbins=20,
-                                   color_discrete_sequence=[PWC_COLORS["accent_rose"]])
-                fig = apply_dark_theme(fig)
-                fig.update_layout(height=350, title="Ring Size Distribution")
-                st.plotly_chart(fig, use_container_width=True)
+        ring_view = ring_df.copy()
+        if "ring_member_count" in ring_view.columns:
+            ring_view = ring_view[ring_view["ring_member_count"] >= min_members]
+        if "ring_risk_score" in ring_view.columns:
+            ring_view = ring_view[ring_view["ring_risk_score"] >= min_risk]
+        if ring_kind and "ring_type" in ring_view.columns:
+            ring_view = ring_view[ring_view["ring_type"].astype(str).isin(ring_kind)]
 
-        with col2:
-            if "ring_risk_score" in ring_df.columns:
-                fig = px.histogram(ring_df, x="ring_risk_score", nbins=20,
-                                   color_discrete_sequence=[PWC_COLORS["primary"]])
-                fig = apply_dark_theme(fig)
-                fig.update_layout(height=350, title="Ring Risk Score Distribution")
-                st.plotly_chart(fig, use_container_width=True)
+        if ring_view.empty:
+            st.info("No rings match the current filters.")
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                if "ring_member_count" in ring_view.columns and "ring_risk_score" in ring_view.columns:
+                    fig = px.scatter(
+                        ring_view,
+                        x="ring_member_count",
+                        y="ring_risk_score",
+                        size="ring_total_amount" if "ring_total_amount" in ring_view.columns else None,
+                        color="ring_type" if "ring_type" in ring_view.columns else None,
+                        hover_data=[c for c in ["ring_id", "ring_edge_count", "ring_avg_edge_weight", "ring_path_signature"] if c in ring_view.columns],
+                        title="Ring size versus risk",
+                    )
+                    fig = apply_dark_theme(fig)
+                    fig.update_layout(height=380)
+                    st.plotly_chart(fig, use_container_width=True)
 
-        st.dataframe(ring_df.head(100), use_container_width=True, height=300)
+            with col2:
+                if "ring_risk_score" in ring_view.columns:
+                    fig = px.histogram(
+                        ring_view,
+                        x="ring_risk_score",
+                        nbins=20,
+                        color_discrete_sequence=[PWC_COLORS["primary"]],
+                        title="Ring Risk Score Distribution",
+                    )
+                    fig = apply_dark_theme(fig)
+                    fig.update_layout(height=380)
+                    st.plotly_chart(fig, use_container_width=True)
+
+            inspect_ring = st.selectbox("Inspect ring", ring_view["ring_id"].astype(str).tolist())
+            selected_ring = ring_view[ring_view["ring_id"].astype(str) == str(inspect_ring)].iloc[0]
+            detail_cols = st.columns(4)
+            with detail_cols[0]:
+                render_kpi("groups", "Members", f"{int(selected_ring.get('ring_member_count', 0)):,}", "", "orange")
+            with detail_cols[1]:
+                render_kpi("share", "Edges", f"{int(selected_ring.get('ring_edge_count', 0)):,}", "", "teal")
+            with detail_cols[2]:
+                render_kpi("warning", "Risk", f"{float(selected_ring.get('ring_risk_score', 0.0)):.4f}", "", "red")
+            with detail_cols[3]:
+                render_kpi("payments", "Amount", f"{float(selected_ring.get('ring_total_amount', 0.0)):.0f}", "", "gold")
+
+            st.code(str(selected_ring.get("ring_path_signature", "")))
+            members = selected_ring.get("ring_members", [])
+            if isinstance(members, str):
+                members = [item.strip() for item in members.split(",") if item.strip()]
+            st.caption(", ".join(map(str, members[:20])))
+            st.dataframe(ring_view.head(100), use_container_width=True, height=300)
 
 
 def page_model_training():
     render_top_bar("Model Training Studio", "Configure, train, and evaluate classification models")
     render_progress_steps(5)
+    render_page_intro("Choose the champion and challenger, define the split window, and compare their class performance and diagnostics before packaging the model.")
 
     working_df = st.session_state.graph_feature_df if st.session_state.graph_feature_df is not None else st.session_state.feature_df
 
@@ -2286,6 +3211,7 @@ def page_model_training():
         return
 
     render_section("Algorithm Selection", "model_training")
+    render_section_note("Pick the model family and training controls first so the champion/challenger comparison stays consistent.")
 
     col1, col2 = st.columns(2)
 
@@ -2324,6 +3250,7 @@ def page_model_training():
     CONFIG["valid_end"] = str(valid_end)
 
     render_section("Training Pipeline", "play_arrow")
+    render_section_note("Run each stage separately when you want to inspect timing, or use Run All for a complete pass.")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -2410,6 +3337,7 @@ def page_model_training():
         le = st.session_state.model6_artifacts.label_encoder
 
         render_section("Model Performance", "leaderboard")
+        render_section_note("Use the report, confusion matrix, and feature importance views to compare rank order and class separation.")
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -2447,15 +3375,76 @@ def page_model_training():
                               yaxis=dict(autorange="reversed"))
             st.plotly_chart(fig, use_container_width=True)
 
+        render_section("Model Diagnostics", "analytics")
+        render_section_note("The diagnostics surface confidence, mean class probabilities, and low-confidence test cases.")
+        diag_cols = st.columns([1.0, 1.0, 1.0])
+        with diag_cols[0]:
+            if st.session_state.test_prob is not None:
+                confidence = np.max(st.session_state.test_prob, axis=1)
+                fig = px.histogram(
+                    pd.DataFrame({"Confidence": confidence}),
+                    x="Confidence",
+                    nbins=30,
+                    title="Prediction confidence",
+                )
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=320)
+                st.plotly_chart(fig, use_container_width=True)
+        with diag_cols[1]:
+            if st.session_state.test_prob is not None and len(st.session_state.test_prob) > 0:
+                avg_prob = pd.DataFrame(st.session_state.test_prob, columns=le.classes_).mean().sort_values(ascending=False).reset_index()
+                avg_prob.columns = ["Class", "Mean Probability"]
+                fig = px.bar(avg_prob, x="Class", y="Mean Probability", color="Mean Probability", title="Mean predicted probability")
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=320, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+        with diag_cols[2]:
+            if st.session_state.test_prob is not None:
+                uncertain_idx = np.argsort(np.max(st.session_state.test_prob, axis=1))[:20]
+                uncertain = pd.DataFrame({
+                    "actual": le.inverse_transform(y_test[uncertain_idx]),
+                    "predicted": le.inverse_transform(test_pred[uncertain_idx]),
+                    "confidence": np.max(st.session_state.test_prob[uncertain_idx], axis=1),
+                }).sort_values("confidence")
+                st.dataframe(uncertain.round(4), use_container_width=True, height=320)
+
+        if st.session_state.test_prob is not None:
+            per_class = []
+            report = classification_report(y_test, test_pred, target_names=le.classes_, output_dict=True)
+            for cls in le.classes_:
+                if cls in report:
+                    per_class.append({
+                        "Class": cls,
+                        "Precision": report[cls]["precision"],
+                        "Recall": report[cls]["recall"],
+                        "F1": report[cls]["f1-score"],
+                    })
+            if per_class:
+                per_class_df = pd.DataFrame(per_class)
+                fig = px.bar(
+                    per_class_df.melt(id_vars="Class", var_name="Metric", value_name="Score"),
+                    x="Class",
+                    y="Score",
+                    color="Metric",
+                    barmode="group",
+                    title="Per-class metrics",
+                )
+                fig = apply_dark_theme(fig)
+                fig.update_layout(height=420)
+                st.plotly_chart(fig, use_container_width=True)
+
 
 def page_alerts():
     render_top_bar("Alert Engine", "Decision engine and intelligent alert packaging")
     render_progress_steps(6)
+    render_page_intro("Score the held-out data, package the highest-risk cases, and inspect the reasons that pushed each alert into the queue.")
 
     if st.session_state.model6_artifacts is None:
         st.warning("Train models first in Step 5")
         return
 
+    render_section("Decision and Packaging", "gavel")
+    render_section_note("Run the decision engine first, then convert the scored test set into alert packets and triage-ready thresholds.")
     col1, col2 = st.columns(2)
 
     with col1:
@@ -2516,20 +3505,111 @@ def page_alerts():
             st.plotly_chart(fig, use_container_width=True)
 
         render_section("Alert Details", "list_alt")
+        render_section_note("This table lists the scored cases in priority order with the most important signal columns exposed.")
         st.dataframe(ao.head(500), use_container_width=True, height=400)
 
         csv = ao.to_csv(index=False)
         st.download_button("Download Alerts", data=csv, file_name="alerts.csv", mime="text/csv")
 
+        render_section("Alert Triage", "filter_alt")
+        render_section_note("Filter by tier, score floor, and queue size to narrow the review set to the cases you care about.")
+        triage_cols = st.columns([1.0, 1.0, 1.0])
+        with triage_cols[0]:
+            tier_choices = sorted(ao["risk_tier"].dropna().astype(str).unique().tolist()) if "risk_tier" in ao.columns else []
+            tier_filter = st.multiselect("Risk tiers", tier_choices, default=tier_choices)
+        with triage_cols[1]:
+            score_floor = st.slider("Min final score", 0.0, 1.0, 0.35, 0.01)
+        with triage_cols[2]:
+            queue_size = st.slider("Queue size", 20, 500, 100, step=20)
+
+        triage_view = ao.copy()
+        if tier_filter and "risk_tier" in triage_view.columns:
+            triage_view = triage_view[triage_view["risk_tier"].astype(str).isin(tier_filter)]
+        score_col = "final_mule_score" if "final_mule_score" in triage_view.columns else ("mule_score" if "mule_score" in triage_view.columns else None)
+        if score_col:
+            triage_view = triage_view[pd.to_numeric(triage_view[score_col], errors="coerce").fillna(0) >= score_floor]
+
+        if triage_view.empty:
+            st.info("No alerts match the current filters.")
+        else:
+            left, right = st.columns(2)
+            with left:
+                if score_col:
+                    fig = px.histogram(
+                        triage_view,
+                        x=score_col,
+                        color="risk_tier" if "risk_tier" in triage_view.columns else None,
+                        nbins=30,
+                        title="Alert score distribution",
+                    )
+                    fig = apply_dark_theme(fig)
+                    fig.update_layout(height=360)
+                    st.plotly_chart(fig, use_container_width=True)
+            with right:
+                if {"final_mule_score", "risk_tier"}.issubset(triage_view.columns):
+                    fig = px.box(
+                        triage_view,
+                        x="risk_tier",
+                        y="final_mule_score",
+                        color="risk_tier",
+                        points="outliers",
+                        title="Score spread by risk tier",
+                    )
+                    fig = apply_dark_theme(fig)
+                    fig.update_layout(height=360, showlegend=False)
+                    st.plotly_chart(fig, use_container_width=True)
+
+            st.dataframe(triage_view.head(queue_size), use_container_width=True, height=320)
+
+        if "reasons" in ao.columns:
+            render_section("Reason Explorer", "psychology")
+            render_section_note("The reason explorer shows the most common drivers behind the packaged alert decisions.")
+            reason_rows = []
+            for _, row in ao.head(500).iterrows():
+                raw_reasons = row.get("reasons", [])
+                if isinstance(raw_reasons, str):
+                    raw_reasons = [item.strip() for item in raw_reasons.split(";") if item.strip()]
+                for reason in raw_reasons:
+                    reason_rows.append({
+                        "reason": reason,
+                        "risk_tier": row.get("risk_tier", "UNKNOWN"),
+                        "score": float(row.get("final_mule_score", row.get("mule_score", 0.0))),
+                    })
+            if reason_rows:
+                reasons_df = pd.DataFrame(reason_rows)
+                reason_filter_cols = st.columns([1.0, 1.0])
+                with reason_filter_cols[0]:
+                    reason_query = st.text_input("Search reason", value="")
+                with reason_filter_cols[1]:
+                    reason_tier = st.selectbox("Reason tier", ["All"] + sorted(reasons_df["risk_tier"].astype(str).unique().tolist()))
+                filtered_reasons = reasons_df.copy()
+                if reason_query:
+                    filtered_reasons = filtered_reasons[filtered_reasons["reason"].str.contains(reason_query, case=False, na=False)]
+                if reason_tier != "All":
+                    filtered_reasons = filtered_reasons[filtered_reasons["risk_tier"].astype(str) == str(reason_tier)]
+                if not filtered_reasons.empty:
+                    reason_counts = filtered_reasons["reason"].value_counts().head(15).reset_index()
+                    reason_counts.columns = ["Reason", "Count"]
+                    fig = px.bar(reason_counts, x="Reason", y="Count", title="Most common alert reasons")
+                    fig = apply_dark_theme(fig)
+                    fig.update_layout(height=360, showlegend=False)
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.dataframe(filtered_reasons.head(150), use_container_width=True, height=260)
+                else:
+                    st.info("No reasons match the current filters.")
+
 
 def page_feedback():
     render_top_bar("Feedback Loop", "Weak supervision and model performance feedback")
     render_progress_steps(7)
+    render_page_intro("Combine weak supervision and analyst-style review signals so the next iteration has a clearer path to better case quality.")
 
     if st.session_state.alert_output is None:
         st.warning("Generate alerts first in Step 6")
         return
 
+    render_section("Feedback Run", "loop")
+    render_section_note("This pass joins the alert output with feedback signals and prepares the downstream review artifacts.")
     if st.button("Run Feedback Loop", type="primary"):
         from feedback_loop import FeedbackLoop
 
@@ -2546,6 +3626,7 @@ def page_feedback():
 
     if st.session_state.feedback_outputs is not None:
         render_section("Feedback Results", "insights")
+        render_section_note("Each table below is a derived artifact from the feedback pass and can be inspected independently.")
         outputs = st.session_state.feedback_outputs
         if isinstance(outputs, dict):
             for key, val in outputs.items():
@@ -2557,11 +3638,13 @@ def page_feedback():
 def page_export():
     render_top_bar("Save and Export", "Save models, convert to ONNX, and validate with fresh data")
     render_progress_steps(8)
+    render_page_intro("Persist the trained artifacts, check the ONNX path, and validate the package against fresh data before handing it off.")
 
     tab1, tab2, tab3 = st.tabs(["Save Models", "ONNX Conversion", "Fresh Data Test"])
 
     with tab1:
         render_section("Save Model Artifacts", "save")
+        render_section_note("Save the fitted objects and configuration bundle so the model can be reloaded without retraining.")
 
         if st.session_state.model6_artifacts is None:
             st.warning("Train models first")
@@ -2618,6 +3701,7 @@ def page_export():
 
     with tab2:
         render_section("ONNX Conversion", "transform")
+        render_section_note("This tab converts the packaged classifier into an ONNX-friendly flow for lightweight deployment checks.")
 
         USE_ONNX = False
         try:
@@ -2669,6 +3753,7 @@ def page_export():
 
     with tab3:
         render_section("Test with Fresh Data", "science")
+        render_section_note("Use a fresh synthetic sample to confirm the saved artifacts still score end to end after export.")
 
         if not os.path.exists("best_model.pkl"):
             st.warning("Save models first")
@@ -2777,6 +3862,7 @@ def page_export():
 
 def page_monitoring():
     render_top_bar("System Monitoring", "Pipeline execution status and performance metrics")
+    render_page_intro("Track which stages are complete, how long each one took, and which files were saved so the workspace stays transparent.")
 
     steps = [
         ("Data Gen", st.session_state.raw_tables is not None),
@@ -2790,6 +3876,7 @@ def page_monitoring():
     ]
 
     render_section("Step Status", "check_circle")
+    render_section_note("These cards show which stages are ready and which ones still need to be run.")
 
     cols = st.columns(8)
     for i, (name, done) in enumerate(steps):
@@ -2800,6 +3887,7 @@ def page_monitoring():
 
     if st.session_state.step_times:
         render_section("Execution Timeline", "timeline")
+        render_section_note("The bar chart compares runtime across the completed stages so you can spot slow steps quickly.")
 
         data = pd.DataFrame([{"Step": k, "Time": round(v, 2)} for k, v in st.session_state.step_times.items()])
         fig = px.bar(data, y="Step", x="Time", orientation="h",
@@ -2817,6 +3905,7 @@ def page_monitoring():
             render_kpi("speed", "Avg Step", f"{total/len(st.session_state.step_times):.1f}s", "", "teal")
 
     render_section("Saved Files", "folder")
+    render_section_note("Artifacts written to disk are listed below with an availability check and file size when present.")
 
     files = {
         "best_model.pkl": "Complete model",

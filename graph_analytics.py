@@ -7,6 +7,18 @@ from utils import print_step
 
 
 class GraphAnalytics:
+    def _node_type(self, node_id):
+        text = str(node_id)
+        prefix, _, _ = text.partition("::")
+        return {
+            "cust": "customer",
+            "acct": "account",
+            "dev": "device",
+            "ip": "ip",
+            "cp": "counterparty",
+            "mch": "merchant",
+        }.get(prefix, prefix or "node")
+
     def _pick_sample(self, df, sample_key):
         sample_size = min(int(CONFIG.get(sample_key, len(df))), len(df))
         if sample_size <= 0:
@@ -62,25 +74,41 @@ class GraphAnalytics:
         degree_cent = nx.degree_centrality(graph)
         clustering = nx.clustering(graph) if graph.number_of_nodes() <= 2200 else {}
         pagerank = nx.pagerank(graph, alpha=0.85, max_iter=60) if graph.number_of_nodes() <= 1800 else {}
+        core_number = nx.core_number(graph) if graph.number_of_nodes() <= 3000 and graph.number_of_edges() > 0 else {}
 
         community_map = {}
+        component_size_map = {}
+        component_edge_map = {}
+        component_density_map = {}
         cycle_nodes = set()
         for component_id, component in enumerate(nx.connected_components(graph)):
             subgraph = graph.subgraph(component)
             for node in component:
                 community_map[node] = component_id
+                component_size_map[node] = len(component)
+                component_edge_map[node] = subgraph.number_of_edges()
+                component_density_map[node] = float(nx.density(subgraph)) if subgraph.number_of_nodes() > 1 else 0.0
             if subgraph.number_of_edges() >= subgraph.number_of_nodes():
                 cycle_nodes.update(component)
 
         nodes = list(graph.nodes())
+        node_types = [self._node_type(node) for node in nodes]
+        degree_values = [graph.degree(node) for node in nodes]
+        max_degree = max(degree_values) if degree_values else 1
         graph_features = pd.DataFrame(
             {
                 "node_id": nodes,
+                "graph_node_type": node_types,
                 "graph_degree_centrality": [degree_cent.get(node, 0.0) for node in nodes],
                 "graph_clustering": [clustering.get(node, 0.0) for node in nodes],
                 "graph_pagerank": [pagerank.get(node, 0.0) for node in nodes],
                 "graph_community_id": [community_map.get(node, -1) for node in nodes],
                 "graph_cycle_flag": [int(node in cycle_nodes) for node in nodes],
+                "graph_component_size": [component_size_map.get(node, 1) for node in nodes],
+                "graph_component_edges": [component_edge_map.get(node, 0) for node in nodes],
+                "graph_component_density": [component_density_map.get(node, 0.0) for node in nodes],
+                "graph_core_number": [core_number.get(node, 0) for node in nodes],
+                "graph_degree_rank": [round((graph.degree(node) / max_degree), 4) if max_degree else 0.0 for node in nodes],
             }
         )
 
@@ -161,9 +189,11 @@ class GraphAnalytics:
                     "ring_edge_count": subgraph.number_of_edges(),
                     "ring_density": round(float(density), 4),
                     "ring_total_amount": round(float(total_amount), 2),
+                    "ring_avg_edge_weight": round(float(total_amount / max(subgraph.number_of_edges(), 1)), 2),
                     "ring_risk_score": round(risk_score, 4),
                     "ring_path_signature": "->".join(cycle_path),
                     "ring_members": member_list,
+                    "ring_type": "cycle",
                 }
             )
 
@@ -193,9 +223,11 @@ class GraphAnalytics:
                         "ring_edge_count": int(row["ring_edge_count"]),
                         "ring_density": round(float(density), 4),
                         "ring_total_amount": round(float(row["ring_total_amount"]), 2),
+                        "ring_avg_edge_weight": round(float(row["ring_total_amount"] / max(row["ring_edge_count"], 1)), 2),
                         "ring_risk_score": round(risk_score, 4),
                         "ring_path_signature": "->".join(members[:6]),
                         "ring_members": members,
+                        "ring_type": "hub",
                     }
                 )
 
@@ -211,9 +243,11 @@ class GraphAnalytics:
                     "ring_edge_count",
                     "ring_density",
                     "ring_total_amount",
+                    "ring_avg_edge_weight",
                     "ring_risk_score",
                     "ring_path_signature",
                     "ring_members",
+                    "ring_type",
                 ]
             )
 

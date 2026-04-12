@@ -41,6 +41,7 @@ class Model6Artifacts:
 
 class MulticlassModel:
     def split_time_based(self, df, train_end, valid_end):
+        df = df.sort_values("event_ts").reset_index(drop=True).copy()
         train_df = df[df["event_ts"] <= pd.to_datetime(train_end)].copy()
         valid_df = df[(df["event_ts"] > pd.to_datetime(train_end)) & (df["event_ts"] <= pd.to_datetime(valid_end))].copy()
         test_df = df[df["event_ts"] > pd.to_datetime(valid_end)].copy()
@@ -205,7 +206,7 @@ class MulticlassModel:
             valid_pred_ch = challenger_model.predict(X_valid_ch)
             test_pred_ch = challenger_model.predict(X_test_ch)
 
-        print(classification_report(y_test, test_pred, target_names=label_enc.classes_))
+        print(classification_report(y_test, test_pred, target_names=label_enc.classes_, zero_division=0))
         print("Accuracy:", accuracy_score(y_test, test_pred))
         print("Macro F1:", f1_score(y_test, test_pred, average="macro"))
         print("Top-2 accuracy:", top_k_accuracy_score(y_test, test_prob, k=min(2, len(label_enc.classes_)), labels=np.arange(len(label_enc.classes_))))

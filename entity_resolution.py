@@ -3,6 +3,19 @@ import pandas as pd
 import numpy as np
 import warnings
 class EntityResolution:
+    def _finalize_view(self, df, key_col):
+        if key_col in df.columns:
+            df = df.sort_values(key_col).drop_duplicates(subset=[key_col], keep="last").reset_index(drop=True)
+        return df
+
+    def _merge_view(self, base_df, view_df, key_col):
+        if key_col not in base_df.columns or key_col not in view_df.columns:
+            return base_df
+        duplicate_cols = [col for col in view_df.columns if col in base_df.columns and col != key_col]
+        if duplicate_cols:
+            view_df = view_df.drop(columns=duplicate_cols)
+        return base_df.merge(view_df, on=key_col, how="left")
+
     def build_entity_views(self, raw_tables):
         print_step("STEP 3: BUILD ENTITY VIEWS")
         customer_view = (
@@ -19,11 +32,13 @@ class EntityResolution:
             .merge(raw_tables["CIF_RISK_PROFILE"], on="customer_id", how="left")
             .merge(raw_tables["CIF_VIDEO_KYC_LOG"], on="customer_id", how="left")
         )
+        customer_view = self._finalize_view(customer_view, "customer_id")
         account_view = (
             raw_tables["ACCOUNT_MASTER"]
             .merge(raw_tables["ACCOUNT_STATUS_HISTORY"], on="account_id", how="left")
             .merge(raw_tables["ACCOUNT_LIMIT_HISTORY"], on="account_id", how="left")
         )
+        account_view = self._finalize_view(account_view, "account_id")
         device_view = (
             raw_tables["DIGITAL_DEVICE_MASTER"]
             .merge(raw_tables["MOBILE_APP_DEVICE_REGISTRY"], on="device_id", how="left")
@@ -37,6 +52,7 @@ class EntityResolution:
             .merge(raw_tables["TELCO_SIM_REGISTRY"], on="sim_card_number_hash", how="left")
             .merge(raw_tables["TELCO_DATA_FEED"], on="sim_card_number_hash", how="left")
         )
+        device_view = self._finalize_view(device_view, "device_id")
         merchant_view = (
             raw_tables["DIM_MERCHANT"]
             .merge(raw_tables["DIM_MERCHANT_TERMINAL"], on="merchant_id", how="left")
@@ -50,7 +66,9 @@ class EntityResolution:
             .merge(raw_tables["MERCHANT_SETTLEMENT_CONFIG"], on="merchant_id", how="left")
             .merge(raw_tables["POS_TERMINAL_MASTER"], on="merchant_id", how="left")
         )
+        merchant_view = self._finalize_view(merchant_view, "merchant_id")
         beneficiary_view = raw_tables["BENEFICIARY_MASTER"].merge(raw_tables["TBAADM.GAM"], on="counterparty_account_number", how="left")
+        beneficiary_view = self._finalize_view(beneficiary_view, "counterparty_id")
         return {
             "customer_view": customer_view,
             "account_view": account_view,
@@ -146,14 +164,18 @@ class EntityResolution:
             events = pd.DataFrame(columns=common_cols)
         events["event_ts"] = pd.to_datetime(events["event_ts"], errors="coerce")
         events = events.dropna(subset=["event_ts"]).sort_values("event_ts").reset_index(drop=True)
+        events["event_date"] = events["event_ts"].dt.floor("D")
+        events["event_hour"] = events["event_ts"].dt.hour
+        events["event_year"] = events["event_ts"].dt.year
         return events
 
     def build_single_view(self, events, entity_views):
         print_step("STEP 5: BUILD SINGLE VIEW")
         out = events.copy()
-        out = out.merge(entity_views["customer_view"], on="customer_id", how="left")
-        out = out.merge(entity_views["account_view"], on="account_id", how="left")
-        out = out.merge(entity_views["device_view"], on="device_id", how="left")
-        out = out.merge(entity_views["merchant_view"], on="merchant_id", how="left")
-        out = out.merge(entity_views["beneficiary_view"], on="counterparty_id", how="left")
+        out = self._merge_view(out, entity_views["customer_view"], "customer_id")
+        out = self._merge_view(out, entity_views["account_view"], "account_id")
+        out = self._merge_view(out, entity_views["device_view"], "device_id")
+        out = self._merge_view(out, entity_views["merchant_view"], "merchant_id")
+        out = self._merge_view(out, entity_views["beneficiary_view"], "counterparty_id")
+        out = out.sort_values(["customer_id", "event_ts"]).reset_index(drop=True)
         return out
