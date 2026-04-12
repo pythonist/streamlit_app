@@ -83,7 +83,7 @@ class MulticlassModel:
             return LinearSVC(class_weight="balanced", max_iter=4000, random_state=CONFIG["random_state"])
         if model_name == "Naive Bayes":
             return GaussianNB()
-        return LogisticRegression(max_iter=2000, class_weight="balanced", solver="saga", n_jobs=-1)
+        return LogisticRegression(max_iter=1200, class_weight="balanced")
 
     def _select_feature_columns(self, train_df):
         exclude_cols = {
