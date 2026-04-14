@@ -1243,7 +1243,7 @@ def render_network_graph(df, ring_df=None):
     edges = []
     nodes_set = set()
 
-    sample = df.head(500)
+    sample = df.head(220)
     for _, r in sample.iterrows():
         cust = str(r.get("customer_id", ""))
         acct = str(r.get("account_id", ""))
@@ -1261,13 +1261,13 @@ def render_network_graph(df, ring_df=None):
 
     ring_paths = []
     if ring_df is not None and len(ring_df) > 0:
-        for _, r in ring_df.head(10).iterrows():
+        for _, r in ring_df.head(6).iterrows():
             if "ring_path_signature" in ring_df.columns:
                 path = r["ring_path_signature"].split("->")
                 ring_paths.append(path)
 
-    nodes_list = list(nodes_set)[:200]
-    edges_list = edges[:500]
+    nodes_list = list(nodes_set)[:120]
+    edges_list = edges[:260]
 
     nodes_json = json.dumps([{"id": n, "label": n[:8]} for n in nodes_list])
     edges_json = json.dumps([{"from": e["from"], "to": e["to"]} for e in edges_list])
@@ -1372,7 +1372,7 @@ def render_network_graph(df, ring_df=None):
             }}
         }}
 
-        forceSimulation(80);
+        forceSimulation(35);
 
         function draw() {{
             ctx.clearRect(0, 0, W, H);
@@ -1458,7 +1458,7 @@ def node_id_display(node_id):
 def build_interactive_network_figure(df, graph_features=None, ring_df=None, focus_node=None, depth=1, max_nodes=80, color_by="Node Type"):
     theme = current_theme()
     graph = nx.Graph()
-    sample = df.head(min(len(df), 800)).copy()
+    sample = df.head(min(len(df), 450)).copy()
     prefix_map = {
         "customer_id": "cust",
         "account_id": "acct",
@@ -1546,7 +1546,7 @@ def build_interactive_network_figure(df, graph_features=None, ring_df=None, focu
             elif isinstance(members, (list, tuple, set)):
                 ring_nodes.update(map(str, members))
 
-    pos = nx.spring_layout(graph, seed=int(CONFIG.get("random_state", 42)), iterations=60)
+    pos = nx.spring_layout(graph, seed=int(CONFIG.get("random_state", 42)), iterations=24)
 
     edge_x = []
     edge_y = []
@@ -1977,6 +1977,32 @@ def collect_overview_metrics():
     return metrics
 
 
+def compute_model_evaluation_summary(y_true, y_pred):
+    if y_true is None or y_pred is None:
+        return None
+
+    y_true_arr = np.asarray(y_true)
+    y_pred_arr = np.asarray(y_pred)
+    if y_true_arr.size == 0 or y_pred_arr.size == 0 or y_true_arr.shape[0] != y_pred_arr.shape[0]:
+        return None
+
+    from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+
+    return {
+        "accuracy": float(accuracy_score(y_true_arr, y_pred_arr)),
+        "weighted_precision": float(precision_score(y_true_arr, y_pred_arr, average="weighted", zero_division=0)),
+        "weighted_recall": float(recall_score(y_true_arr, y_pred_arr, average="weighted", zero_division=0)),
+        "weighted_f1": float(f1_score(y_true_arr, y_pred_arr, average="weighted", zero_division=0)),
+        "macro_precision": float(precision_score(y_true_arr, y_pred_arr, average="macro", zero_division=0)),
+        "macro_recall": float(recall_score(y_true_arr, y_pred_arr, average="macro", zero_division=0)),
+        "macro_f1": float(f1_score(y_true_arr, y_pred_arr, average="macro", zero_division=0)),
+    }
+
+
+def format_metric_value(value):
+    return f"{float(value):.3f}" if value is not None and not pd.isna(value) else "Unavailable"
+
+
 def build_inference_splits(df):
     from multiclass_model import MulticlassModel
 
@@ -1998,14 +2024,12 @@ def build_inference_splits(df):
     return train_df, valid_df, test_df
 
 
-def generate_fresh_inference_batch(seed):
+def generate_fresh_inference_batch(seed, include_sequence=False):
     import random
 
     from data_ingestion import DataIngestion
     from entity_resolution import EntityResolution
     from feature_engineering import FeatureEngineering
-    from graph_analytics import GraphAnalytics
-    from sequence_models import SequenceModels
 
     original_seed = int(CONFIG["random_state"])
     timings = {}
@@ -2033,29 +2057,28 @@ def generate_fresh_inference_batch(seed):
         feat = FeatureEngineering()
         clean_df = timed("EDA", lambda: feat.run_eda_and_imputation(single_view))
         feature_df = timed("Features", lambda: feat.feature_engineering(clean_df))
+        train_df, valid_df, test_df = timed("Split", lambda: build_inference_splits(feature_df))
 
-        graph = GraphAnalytics()
-        graph_feature_df, graph_features = timed("Graph", lambda: graph.model1_graph_analytics(feature_df))
-        graph_feature_df, ring_df = timed("Rings", lambda: graph.model2_ring_detection(graph_feature_df))
+        model5_outputs = {}
+        if include_sequence:
+            from sequence_models import SequenceModels
 
-        train_df, valid_df, test_df = timed("Split", lambda: build_inference_splits(graph_feature_df))
-
-        seq = SequenceModels()
-        model3, train_df, valid_df, test_df = timed("Hazard", lambda: seq.model3_hazard(train_df, valid_df, test_df))
-        model4, train_df, valid_df, test_df = timed("HMM", lambda: seq.model4_hmm(train_df, valid_df, test_df))
-        model5_outputs = timed("Sequence", lambda: seq.model5_lstm_and_transformer(train_df, valid_df, test_df))
+            seq = SequenceModels()
+            _model3, train_df, valid_df, test_df = timed("Hazard", lambda: seq.model3_hazard(train_df, valid_df, test_df))
+            _model4, train_df, valid_df, test_df = timed("HMM", lambda: seq.model4_hmm(train_df, valid_df, test_df))
+            model5_outputs = timed("Sequence", lambda: seq.model5_lstm_and_transformer(train_df, valid_df, test_df))
 
         return {
             "seed": int(seed),
             "profile": st.session_state.demo_profile,
             "generated_at": pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
             "timings": timings,
-            "ring_df": ring_df,
             "train_df": train_df,
             "valid_df": valid_df,
             "test_df": test_df,
             "feature_count": int(feature_df.shape[1]),
-            "ring_count": int(len(ring_df)) if ring_df is not None else 0,
+            "sequence_ready": bool(include_sequence),
+            "inference_mode": "Hidden Markov Sequence" if include_sequence else "Champion Scoring",
             "sequence_model_type": model5_outputs.get("sequence_model_type", "unknown") if isinstance(model5_outputs, dict) else "unknown",
         }
     finally:
@@ -2070,6 +2093,7 @@ def get_active_model_bundle():
         return {
             "source": "Current workspace",
             "model_label": CONFIG.get("classifier_model", "Random Forest"),
+            "evaluation_summary": compute_model_evaluation_summary(st.session_state.y_test, st.session_state.test_pred),
             "preprocessor": artifacts.preprocessor,
             "label_encoder": artifacts.label_encoder,
             "base_model": artifacts.base_model,
@@ -2083,7 +2107,8 @@ def get_active_model_bundle():
             saved = pickle.load(model_file)
         return {
             "source": "Saved artifact",
-            "model_label": saved.get("model_type", "Saved champion model"),
+            "model_label": saved.get("model_display_name", saved.get("model_type", "Saved champion model")),
+            "evaluation_summary": saved.get("evaluation_summary"),
             "preprocessor": saved["preprocessor"],
             "label_encoder": saved["label_encoder"],
             "base_model": saved["base_model"],
@@ -2160,6 +2185,7 @@ def run_multiclass_inference(bundle, scoring_df):
     confusion_df = None
     accuracy = None
     macro_f1 = None
+    evaluation_summary = None
     if "label" in scored.columns:
         actual_labels = scored["label"].astype(str).values
         if np.isin(actual_labels, classes).all():
@@ -2168,6 +2194,7 @@ def run_multiclass_inference(bundle, scoring_df):
             actual_encoded = bundle["label_encoder"].transform(actual_labels)
             accuracy = accuracy_score(actual_encoded, pred_idx)
             macro_f1 = f1_score(actual_encoded, pred_idx, average="macro")
+            evaluation_summary = compute_model_evaluation_summary(actual_encoded, pred_idx)
             report_df = pd.DataFrame(
                 classification_report(
                     actual_encoded,
@@ -2195,6 +2222,7 @@ def run_multiclass_inference(bundle, scoring_df):
         "confusion_df": confusion_df,
         "accuracy": accuracy,
         "macro_f1": macro_f1,
+        "evaluation_summary": evaluation_summary,
         "actual_encoded": actual_encoded,
     }
 
@@ -3156,13 +3184,15 @@ def page_feature_engineering():
         lens_col1, lens_col2 = st.columns(2)
         with lens_col1:
             num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            corr_defaults = [c for c in ["amount", "cust_amount_zscore", "sequence_score", "ring_max_risk_score", "hours_since_prev_txn"] if c in num_cols]
-            corr_defaults = [c for c in corr_defaults if c in num_cols]
+            corr_priority = [c for c in ["amount", "cust_amount_zscore", "sequence_score", "ring_max_risk_score", "hours_since_prev_txn"] if c in num_cols]
+            corr_options = corr_priority + [c for c in num_cols if c not in corr_priority]
+            corr_options = corr_options[:40]
+            corr_defaults = [c for c in corr_priority if c in corr_options]
             if not corr_defaults:
-                corr_defaults = num_cols[: min(8, len(num_cols))]
+                corr_defaults = corr_options[: min(8, len(corr_options))]
             corr_choices = st.multiselect(
                 "Correlation features",
-                options=num_cols[:40],
+                options=corr_options,
                 default=corr_defaults,
             )
             if len(corr_choices) >= 2:
@@ -3202,7 +3232,7 @@ def page_feature_engineering():
         st.caption(f"Filtered rows: {len(filtered):,} of {len(df):,}")
         st.dataframe(filtered.head(200), use_container_width=True, height=280)
 
-    with tab4:
+        with tab4:
             with st.expander("Feature Store", expanded=True):
                 st.caption("Browse the feature catalog, its role in the pipeline, and a short explanation of what each column represents.")
                 feature_store_df = build_feature_store_table(df)
@@ -3269,15 +3299,35 @@ def page_graph_analytics():
         return
 
     render_section("Configuration", "tune")
-    render_section_note("Set the graph sample size and ring search bounds before running community detection and cycle analysis.")
+    render_section_note("This stage now runs in a sampled live-demo mode. It computes only the highest-signal graph slice, skips expensive full-network routines, and lets you keep the heavy visuals off until you need them.")
 
+    graph_sample_cap = 900
+    ring_sample_cap = 450
     col1, col2, col3 = st.columns(3)
     with col1:
-        graph_sample = st.number_input("Graph Sample Size", value=int(CONFIG.get("graph_sample_size", 8000)), min_value=1000, max_value=100000, step=1000)
+        graph_sample = st.number_input(
+            "Graph Sample Size",
+            value=min(int(CONFIG.get("graph_sample_size", graph_sample_cap)), graph_sample_cap),
+            min_value=400,
+            max_value=graph_sample_cap,
+            step=100,
+        )
     with col2:
-        ring_sample = st.number_input("Ring Sample Size", value=int(CONFIG.get("ring_sample_size", 3000)), min_value=500, max_value=100000, step=500)
+        ring_sample = st.number_input(
+            "Ring Sample Size",
+            value=min(int(CONFIG.get("ring_sample_size", ring_sample_cap)), ring_sample_cap),
+            min_value=300,
+            max_value=ring_sample_cap,
+            step=100,
+        )
     with col3:
-        max_rings = st.number_input("Max Rings", value=int(CONFIG.get("max_rings", 25)), min_value=5, max_value=1000, step=5)
+        max_rings = st.number_input("Max Rings", value=min(int(CONFIG.get("max_rings", 8)), 8), min_value=3, max_value=8, step=1)
+
+    render_heavy_graphs = st.toggle(
+        "Render network visuals",
+        value=False,
+        help="Keep this off for the fastest walkthrough. Turn it on only when you want to open the graph canvas and network explorer.",
+    )
 
     col1, col2 = st.columns(2)
 
@@ -3333,40 +3383,46 @@ def page_graph_analytics():
 
     if st.session_state.graph_feature_df is not None:
         render_section("Network Visualization", "share")
-        render_section_note("This overview shows how customers, accounts, and counterparties connect across the sampled network.")
-        render_network_graph(st.session_state.graph_feature_df, st.session_state.ring_df)
+        render_section_note("The sampled graph visuals are optional so the page stays fast during the walkthrough. Use the toggle above when you want to open them.")
+        if render_heavy_graphs:
+            render_network_graph(st.session_state.graph_feature_df, st.session_state.ring_df)
+        else:
+            st.info("Network visuals are paused to keep this page responsive. Enable `Render network visuals` when you want to inspect the graph canvas.")
 
         if st.session_state.graph_features is not None and isinstance(st.session_state.graph_features, pd.DataFrame) and len(st.session_state.graph_features) > 0:
             render_section("Interactive Network Explorer", "travel_explore")
             render_section_note("Focus a node to change the neighborhood depth, node cap, and color encoding.")
             gf = st.session_state.graph_features.copy()
-            top_nodes = gf.sort_values(
-                ["graph_pagerank", "graph_degree_centrality"],
-                ascending=[False, False],
-            )["node_id"].head(120).tolist()
-            focus_col1, focus_col2, focus_col3 = st.columns([1.4, 0.7, 0.7])
-            with focus_col1:
-                focus_node = st.selectbox("Focus node", ["All nodes"] + top_nodes)
-            with focus_col2:
-                depth = st.slider("Neighborhood depth", 1, 2, 1)
-            with focus_col3:
-                node_cap = st.slider("Node cap", 30, 150, 80, step=10)
-            color_by = st.selectbox("Color by", ["Node Type", "Community", "Risk"], index=0)
-            selected_focus = None if focus_node == "All nodes" else focus_node
-            explorer_fig = build_interactive_network_figure(
-                st.session_state.graph_feature_df,
-                gf,
-                st.session_state.ring_df,
-                focus_node=selected_focus,
-                depth=depth,
-                max_nodes=node_cap,
-                color_by=color_by,
-            )
-            st.plotly_chart(
-                explorer_fig,
-                use_container_width=True,
-                config={"displayModeBar": True, "scrollZoom": True, "responsive": True},
-            )
+            if render_heavy_graphs:
+                top_nodes = gf.sort_values(
+                    ["graph_pagerank", "graph_degree_centrality"],
+                    ascending=[False, False],
+                )["node_id"].head(90).tolist()
+                focus_col1, focus_col2, focus_col3 = st.columns([1.4, 0.7, 0.7])
+                with focus_col1:
+                    focus_node = st.selectbox("Focus node", ["All nodes"] + top_nodes)
+                with focus_col2:
+                    depth = st.slider("Neighborhood depth", 1, 2, 1)
+                with focus_col3:
+                    node_cap = st.slider("Node cap", 25, 100, 60, step=5)
+                color_by = st.selectbox("Color by", ["Node Type", "Community", "Risk"], index=0)
+                selected_focus = None if focus_node == "All nodes" else focus_node
+                explorer_fig = build_interactive_network_figure(
+                    st.session_state.graph_feature_df,
+                    gf,
+                    st.session_state.ring_df,
+                    focus_node=selected_focus,
+                    depth=depth,
+                    max_nodes=node_cap,
+                    color_by=color_by,
+                )
+                st.plotly_chart(
+                    explorer_fig,
+                    use_container_width=True,
+                    config={"displayModeBar": True, "scrollZoom": True, "responsive": True},
+                )
+            else:
+                st.caption("Interactive network explorer is waiting in lightweight mode.")
 
             metric_cols = st.columns(4)
             with metric_cols[0]:
@@ -3709,12 +3765,12 @@ def page_model_training():
 
 def page_model_inference():
     render_top_bar("Model Inference", "Generate fresh synthetic test data, compare trained models, and explain single predictions")
-    render_page_intro("This page regenerates an out-of-sample synthetic batch, scores it with the trained champion model, and lets you inspect the HMM sequence layer for abnormal behavior.")
+    render_page_intro("Generate a fresh holdout batch for quick scoring against the trained champion model. This path is now optimized for demos: graph analytics, ring detection, classifier retraining, and alert packaging are skipped unless you explicitly open those stages elsewhere.")
 
     bundle = get_active_model_bundle()
 
     render_section("Inference Controls", "science")
-    render_section_note("Generate a fresh test batch using the current run profile. The same entity resolution, feature engineering, graph enrichment, and sequence steps are applied before scoring. For the quickest demo loop, switch the sidebar run profile to Fast before generating the batch.")
+    render_section_note("Champion mode runs only synthetic data generation, entity resolution, feature engineering, and holdout splitting. Hidden Markov mode adds the sequence layer on top. Graph enrichment is intentionally skipped here so new test batches are ready much faster.")
 
     control_cols = st.columns([0.9, 1.0, 1.2])
     with control_cols[0]:
@@ -3732,8 +3788,10 @@ def page_model_inference():
         st.caption(f"Champion source: {model_source}")
 
     if st.button("Generate Fresh Test Batch", type="primary", use_container_width=True):
-        with st.spinner("Generating fresh synthetic test batch and enrichment layers..."):
-            st.session_state.inference_batch = generate_fresh_inference_batch(int(inference_seed))
+        include_sequence = model_choice == "Hidden Markov Sequence"
+        spinner_text = "Generating fresh sequence-ready batch..." if include_sequence else "Generating fresh scoring batch..."
+        with st.spinner(spinner_text):
+            st.session_state.inference_batch = generate_fresh_inference_batch(int(inference_seed), include_sequence=include_sequence)
         st.rerun()
 
     batch = st.session_state.inference_batch
@@ -3751,14 +3809,16 @@ def page_model_inference():
 
     risky_count = int(test_df["label"].isin(CONFIG["risky_labels"]).sum()) if "label" in test_df.columns else 0
     runtime_secs = sum(batch.get("timings", {}).values())
-    snapshot_cols = st.columns(4)
+    snapshot_cols = st.columns(5)
     with snapshot_cols[0]:
         render_kpi("data_array", "Test Records", f"{len(test_df):,}", "Holdout rows scored in this view", "orange")
     with snapshot_cols[1]:
         render_kpi("warning", "Risky Labels", f"{risky_count:,}", "Rows belonging to risky mule classes", "red")
     with snapshot_cols[2]:
-        render_kpi("hub", "Rings", f"{int(batch.get('ring_count', 0)):,}", "Detected during fresh graph enrichment", "teal")
+        render_kpi("model_training", "Mode", batch.get("inference_mode", "Champion Scoring"), "Graph analytics skipped in this flow", "teal")
     with snapshot_cols[3]:
+        render_kpi("dataset", "Feature Columns", f"{int(batch.get('feature_count', 0)):,}", "Columns available before scoring", "green")
+    with snapshot_cols[4]:
         render_kpi("timer", "Build Time", f"{runtime_secs:.1f}s", batch.get("generated_at", ""), "gold")
 
     timing_df = pd.DataFrame(
@@ -3780,14 +3840,42 @@ def page_model_inference():
 
     if model_choice == "Random Forest Champion":
         render_section("Champion Multiclass Output", "model_training")
-        render_section_note("This view uses the calibrated champion classifier to predict mule typologies for the fresh holdout batch and explains one selected prediction with LIME.")
+        render_section_note("This view uses the trained multiclass champion to score the fresh holdout batch without rerunning graph analytics. The model summary below shows the saved or in-session evaluation snapshot, followed by fresh-batch predictions and LIME explanations.")
 
         if bundle is None:
             st.warning("Train the champion model in Step 5 or save the export bundle before using multiclass inference.")
             return
 
+        trained_summary = bundle.get("evaluation_summary")
+        render_section("Trained Model Summary", "inventory")
+        render_section_note("These are the latest stored evaluation metrics for the trained multiclass champion. Weighted averages reflect class imbalance, and macro averages show how evenly the model treats each mule typology.")
+
+        identity_cols = st.columns(2)
+        with identity_cols[0]:
+            render_kpi("inventory", "Champion", bundle["model_label"], bundle["source"], "orange")
+        with identity_cols[1]:
+            class_count = len(bundle["label_encoder"].classes_) if bundle.get("label_encoder") is not None else 0
+            render_kpi("category", "Classes", f"{class_count}", "Multiclass typologies in the saved bundle", "teal")
+
+        if trained_summary is not None:
+            summary_cols = st.columns(6)
+            summary_specs = [
+                ("Weighted Precision", trained_summary.get("weighted_precision"), "orange"),
+                ("Weighted Recall", trained_summary.get("weighted_recall"), "teal"),
+                ("Weighted F1", trained_summary.get("weighted_f1"), "green"),
+                ("Macro Precision", trained_summary.get("macro_precision"), "gold"),
+                ("Macro Recall", trained_summary.get("macro_recall"), "red"),
+                ("Macro F1", trained_summary.get("macro_f1"), "red"),
+            ]
+            for metric_col, (label, value, accent) in zip(summary_cols, summary_specs):
+                with metric_col:
+                    render_kpi("leaderboard", label, format_metric_value(value), "Stored champion evaluation", accent)
+        else:
+            st.info("Evaluation summary is not stored in the active bundle yet. Train the model in this workspace or save the model again to persist the weighted and macro averages.")
+
         inference_result = run_multiclass_inference(bundle, test_df)
         scored_df = inference_result["scored_df"]
+        fresh_summary = inference_result.get("evaluation_summary")
 
         metric_cols = st.columns(4)
         with metric_cols[0]:
@@ -3798,10 +3886,21 @@ def page_model_inference():
             avg_conf = float(scored_df["prediction_confidence"].mean()) if len(scored_df) else 0.0
             render_kpi("verified", "Avg Confidence", f"{avg_conf:.3f}", "Mean top-class probability", "gold")
         with metric_cols[3]:
-            if inference_result["macro_f1"] is not None:
-                render_kpi("leaderboard", "Macro F1", f"{inference_result['macro_f1']:.3f}", "Fresh synthetic holdout", "green")
+            if fresh_summary is not None:
+                render_kpi("leaderboard", "Weighted F1", format_metric_value(fresh_summary.get("weighted_f1")), "Fresh synthetic holdout", "green")
             else:
-                render_kpi("leaderboard", "Macro F1", "Unavailable", "Ground-truth labels were not aligned", "green")
+                render_kpi("leaderboard", "Weighted F1", "Unavailable", "Ground-truth labels were not aligned", "green")
+
+        if fresh_summary is not None:
+            fresh_cols = st.columns(4)
+            with fresh_cols[0]:
+                render_kpi("analytics", "Weighted Precision", format_metric_value(fresh_summary.get("weighted_precision")), "Fresh holdout", "orange")
+            with fresh_cols[1]:
+                render_kpi("analytics", "Weighted Recall", format_metric_value(fresh_summary.get("weighted_recall")), "Fresh holdout", "teal")
+            with fresh_cols[2]:
+                render_kpi("analytics", "Macro Precision", format_metric_value(fresh_summary.get("macro_precision")), "Fresh holdout", "gold")
+            with fresh_cols[3]:
+                render_kpi("analytics", "Macro Recall", format_metric_value(fresh_summary.get("macro_recall")), "Fresh holdout", "red")
 
         rf_tabs = st.tabs(["Predictions", "Confusion Matrix", "Classification Report", "LIME Explanation"])
 
@@ -3924,7 +4023,11 @@ def page_model_inference():
 
         hmm_df = test_df.copy()
         if "hmm_sequence_anomaly_score" not in hmm_df.columns:
-            st.warning("HMM outputs were not available on this batch. Generate another batch or verify the sequence stage.")
+            st.warning("This batch was generated in fast scoring mode, so the sequence layer was skipped. Regenerate with `Hidden Markov Sequence` selected to prepare the HMM outputs.")
+            if st.button("Regenerate Sequence-Ready Batch", type="primary", use_container_width=True):
+                with st.spinner("Generating fresh sequence-ready batch..."):
+                    st.session_state.inference_batch = generate_fresh_inference_batch(int(inference_seed), include_sequence=True)
+                st.rerun()
             return
 
         anomaly_min = float(hmm_df["hmm_sequence_anomaly_score"].min())
@@ -4066,7 +4169,7 @@ def page_alerts():
         return
 
     render_section("Decision and Packaging", "gavel")
-    render_section_note("Run the decision engine first, then convert the scored test set into alert packets and triage-ready thresholds.")
+    render_section_note("The decision engine blends classifier confidence with behavioral, sequence, graph, and ring signals into a single `final_mule_score`. The packaging step then adds explainable reasons, alert tiers, and reviewer thresholds. Both paths are now trimmed for faster live-demo turnaround.")
     col1, col2 = st.columns(2)
 
     with col1:
@@ -4275,6 +4378,7 @@ def page_export():
                 artifacts = st.session_state.model6_artifacts
                 feature_cols = st.session_state.feature_cols
                 from config import CONFIG
+                evaluation_summary = compute_model_evaluation_summary(st.session_state.y_test, st.session_state.test_pred)
 
                 save_dict = {
                     "preprocessor": artifacts.preprocessor,
@@ -4286,6 +4390,8 @@ def page_export():
                     "feature_cols": feature_cols,
                     "config": CONFIG,
                     "model_type": "CalibratedClassifierCV(RandomForest)",
+                    "model_display_name": CONFIG.get("classifier_model", "Random Forest"),
+                    "evaluation_summary": evaluation_summary,
                     "n_classes": len(artifacts.label_encoder.classes_),
                     "class_names": list(artifacts.label_encoder.classes_),
                     "n_features_raw": len(feature_cols),

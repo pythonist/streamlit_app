@@ -13,6 +13,50 @@ class AlertEngine:
         flagged = df[score_col] >= threshold
         return df.assign(flagged=flagged).groupby(event_dates)["flagged"].sum()
 
+    def _threshold_metrics(self, df, score_col, thresholds):
+        if df.empty or score_col not in df.columns:
+            return pd.DataFrame(columns=["threshold", "avg_daily_alerts", "precision_proxy", "flagged_volume"])
+
+        thresholds = np.round(np.asarray(list(thresholds), dtype=float), 4)
+        if thresholds.size == 0:
+            return pd.DataFrame(columns=["threshold", "avg_daily_alerts", "precision_proxy", "flagged_volume"])
+
+        scores = pd.to_numeric(df[score_col], errors="coerce").fillna(-np.inf).to_numpy()
+        flagged_matrix = scores[:, None] >= thresholds[None, :]
+        flagged_volume = flagged_matrix.sum(axis=0).astype(int)
+
+        precision_proxy = np.zeros(len(thresholds), dtype=float)
+        if "label" in df.columns:
+            risky_mask = df["label"].astype(str).isin(CONFIG["risky_labels"]).to_numpy(dtype=bool)
+            risky_hits = (flagged_matrix & risky_mask[:, None]).sum(axis=0)
+            precision_proxy = np.divide(
+                risky_hits,
+                flagged_volume,
+                out=np.zeros(len(thresholds), dtype=float),
+                where=flagged_volume > 0,
+            )
+
+        avg_daily = np.zeros(len(thresholds), dtype=float)
+        if "event_ts" in df.columns:
+            event_dates = pd.to_datetime(df["event_ts"], errors="coerce").dt.floor("D")
+            valid_dates = event_dates.notna().to_numpy()
+            if valid_dates.any():
+                date_codes = pd.factorize(event_dates[valid_dates], sort=False)[0]
+                valid_flagged = flagged_matrix[valid_dates]
+                counts_by_day = np.zeros((date_codes.max() + 1, len(thresholds)), dtype=np.int32)
+                for idx in range(len(thresholds)):
+                    np.add.at(counts_by_day[:, idx], date_codes, valid_flagged[:, idx].astype(np.int32))
+                avg_daily = counts_by_day.mean(axis=0) if len(counts_by_day) else avg_daily
+
+        return pd.DataFrame(
+            {
+                "threshold": thresholds,
+                "avg_daily_alerts": np.round(avg_daily, 2),
+                "precision_proxy": np.round(precision_proxy, 4),
+                "flagged_volume": flagged_volume,
+            }
+        )
+
     def model7_decision_engine(self, test_df, test_prob, model6_artifacts, model5_outputs=None):
         print_step("STEP 15: MODEL7 DECISION ENGINE")
         out = test_df.copy()
@@ -72,114 +116,121 @@ class AlertEngine:
         else:
             out["primary_category"] = "unknown"
 
-        def strengthen_category(row):
-            if row.get("dormant_activation_flag", 0) == 1 and row.get("sequence_score", 0) >= 0.55:
-                return "sleeper_mule"
-            if row.get("fanout_flag", 0) == 1:
-                return "fanout_mule"
-            if row.get("channel", "") in ["ATM", "BRANCH"] and str(row.get("transaction_type", "")).upper() == "CASHOUT":
-                return "cashout_mule"
-            if row.get("lstm_emerging_prob", 0) >= 0.7 and row.get("first_time_counterparty", 0) == 1:
-                return "first_time_mule"
-            if row.get("behavioral_risk_score", 0) >= 0.65:
-                return "layering_mule"
-            return row["primary_category"]
+        first_time_counterparty = out["first_time_counterparty"] if "first_time_counterparty" in out.columns else pd.Series(0, index=out.index)
+        fanout_flag = out["fanout_flag"] if "fanout_flag" in out.columns else pd.Series(0, index=out.index)
+        dormant_activation_flag = out["dormant_activation_flag"] if "dormant_activation_flag" in out.columns else pd.Series(0, index=out.index)
+        channel_series = out["channel"] if "channel" in out.columns else pd.Series("", index=out.index)
+        transaction_type = out["transaction_type"] if "transaction_type" in out.columns else pd.Series("", index=out.index)
 
-        out["primary_category"] = out.apply(strengthen_category, axis=1)
+        primary_category = out["primary_category"].astype(str).copy()
+        primary_category.loc[out["behavioral_risk_score"].fillna(0) >= 0.65] = "layering_mule"
+        primary_category.loc[
+            (out["lstm_emerging_prob"].fillna(0) >= 0.7) & (first_time_counterparty.fillna(0) == 1)
+        ] = "first_time_mule"
+        primary_category.loc[
+            channel_series.astype(str).isin(["ATM", "BRANCH"])
+            & (transaction_type.astype(str).str.upper() == "CASHOUT")
+        ] = "cashout_mule"
+        primary_category.loc[fanout_flag.fillna(0) == 1] = "fanout_mule"
+        primary_category.loc[
+            (dormant_activation_flag.fillna(0) == 1) & (out["sequence_score"].fillna(0) >= 0.55)
+        ] = "sleeper_mule"
+        out["primary_category"] = primary_category
         return out
 
     def build_reasoning(self, df):
-        def reason_builder(row):
-            reasons, variables = [], []
-            if row.get("first_time_counterparty", 0) == 1:
-                reasons.append("First-time counterparty observed")
-                variables.append("first_time_counterparty")
-            if row.get("first_time_device", 0) == 1:
-                reasons.append("First-time device used")
-                variables.append("first_time_device")
-            if row.get("shared_device_risk", 0) == 1:
-                reasons.append("Shared device across customers")
-                variables.append("shared_device_customer_count")
-            if row.get("shared_ip_risk", 0) == 1:
-                reasons.append("Shared IP across customers")
-                variables.append("shared_ip_customer_count")
-            if row.get("fanout_flag", 0) == 1:
-                reasons.append("Rapid fan-out behavior")
-                variables.append("daily_unique_counterparties")
-            if row.get("velocity_flag", 0) == 1:
-                reasons.append("High transaction velocity")
-                variables.append("daily_txn_count")
-            if row.get("dormant_activation_flag", 0) == 1:
-                reasons.append("Dormant account activation")
-                variables.append("dormancy_days")
-            if row.get("transition_score", 0) > 0.6:
-                reasons.append("Unusual transition path")
-                variables.append("transition_score")
-            if row.get("cust_graph_pagerank", 0) > 0.001:
-                reasons.append("High graph centrality")
-                variables.append("cust_graph_pagerank")
-            if row.get("ring_count", 0) > 0:
-                reasons.append("Account linked to ring/cycle")
-                variables.append("ring_count")
-            if row.get("behavioral_risk_score", 0) >= 0.6:
-                reasons.append("Elevated behavioural risk pattern")
-                variables.append("behavioral_risk_score")
-            if len(reasons) == 0:
-                reasons = ["Model-based typology assignment"]
-                variables = ["model_top_prob"]
-            return pd.Series(
-                {
-                    "primary_reason": reasons[0] if len(reasons) > 0 else None,
-                    "primary_variables": variables[0] if len(variables) > 0 else None,
-                    "secondary_category": "network_risk",
-                    "secondary_reason": reasons[1] if len(reasons) > 1 else None,
-                    "secondary_variables": variables[1] if len(variables) > 1 else None,
-                    "tertiary_category": "sequence_risk",
-                    "tertiary_reason": reasons[2] if len(reasons) > 2 else None,
-                    "tertiary_variables": variables[2] if len(variables) > 2 else None,
-                }
-            )
+        out = df.reset_index(drop=True).copy()
+        if out.empty:
+            return out
 
-        reason_df = df.apply(reason_builder, axis=1)
-        return pd.concat([df.reset_index(drop=True), reason_df.reset_index(drop=True)], axis=1)
+        n_rows = len(out)
+        primary_reason = np.array([""] * n_rows, dtype=object)
+        primary_var = np.array([""] * n_rows, dtype=object)
+        secondary_reason = np.array([""] * n_rows, dtype=object)
+        secondary_var = np.array([""] * n_rows, dtype=object)
+        secondary_cat = np.array([""] * n_rows, dtype=object)
+        tertiary_reason = np.array([""] * n_rows, dtype=object)
+        tertiary_var = np.array([""] * n_rows, dtype=object)
+        tertiary_cat = np.array([""] * n_rows, dtype=object)
+
+        def series_or_default(column_name, default=0):
+            return out[column_name] if column_name in out.columns else pd.Series(default, index=out.index)
+
+        reason_specs = [
+            (series_or_default("first_time_counterparty").fillna(0) == 1, "First-time counterparty observed", "first_time_counterparty", "counterparty_risk"),
+            (series_or_default("first_time_device").fillna(0) == 1, "First-time device used", "first_time_device", "device_risk"),
+            (series_or_default("shared_device_risk").fillna(0) == 1, "Shared device across customers", "shared_device_customer_count", "device_risk"),
+            (series_or_default("shared_ip_risk").fillna(0) == 1, "Shared IP across customers", "shared_ip_customer_count", "network_risk"),
+            (series_or_default("fanout_flag").fillna(0) == 1, "Rapid fan-out behavior", "daily_unique_counterparties", "behavioral_risk"),
+            (series_or_default("velocity_flag").fillna(0) == 1, "High transaction velocity", "daily_txn_count", "behavioral_risk"),
+            (series_or_default("dormant_activation_flag").fillna(0) == 1, "Dormant account activation", "dormancy_days", "sequence_risk"),
+            (pd.to_numeric(series_or_default("transition_score"), errors="coerce").fillna(0) > 0.6, "Unusual transition path", "transition_score", "sequence_risk"),
+            (pd.to_numeric(series_or_default("cust_graph_pagerank"), errors="coerce").fillna(0) > 0.001, "High graph centrality", "cust_graph_pagerank", "network_risk"),
+            (pd.to_numeric(series_or_default("ring_count"), errors="coerce").fillna(0) > 0, "Account linked to ring or cycle", "ring_count", "network_risk"),
+            (pd.to_numeric(series_or_default("behavioral_risk_score"), errors="coerce").fillna(0) >= 0.6, "Elevated behavioural risk pattern", "behavioral_risk_score", "behavioral_risk"),
+        ]
+
+        for mask, reason, variable, category in reason_specs:
+            active = np.asarray(mask, dtype=bool)
+
+            assign_primary = active & (primary_reason == "")
+            primary_reason[assign_primary] = reason
+            primary_var[assign_primary] = variable
+
+            remaining = active & ~assign_primary
+            assign_secondary = remaining & (secondary_reason == "")
+            secondary_reason[assign_secondary] = reason
+            secondary_var[assign_secondary] = variable
+            secondary_cat[assign_secondary] = category
+
+            remaining = remaining & ~assign_secondary
+            assign_tertiary = remaining & (tertiary_reason == "")
+            tertiary_reason[assign_tertiary] = reason
+            tertiary_var[assign_tertiary] = variable
+            tertiary_cat[assign_tertiary] = category
+
+        no_reason = primary_reason == ""
+        primary_reason[no_reason] = "Model-based typology assignment"
+        primary_var[no_reason] = "model_top_prob"
+        secondary_cat[secondary_reason == ""] = ""
+        tertiary_cat[tertiary_reason == ""] = ""
+
+        out["primary_reason"] = primary_reason
+        out["primary_variables"] = primary_var
+        out["secondary_category"] = secondary_cat
+        out["secondary_reason"] = secondary_reason
+        out["secondary_variables"] = secondary_var
+        out["tertiary_category"] = tertiary_cat
+        out["tertiary_reason"] = tertiary_reason
+        out["tertiary_variables"] = tertiary_var
+
+        out["reasons"] = (
+            pd.Series(primary_reason, index=out.index).astype(str)
+            + np.where(secondary_reason != "", "; " + secondary_reason.astype(str), "")
+            + np.where(tertiary_reason != "", "; " + tertiary_reason.astype(str), "")
+        )
+        return out
 
     def threshold_table(self, df, score_col, daily_capacity):
         if df.empty or score_col not in df.columns:
             return pd.DataFrame(columns=["threshold", "avg_daily_alerts", "within_capacity", "precision_proxy", "flagged_volume"])
 
-        rows = []
         thresholds = np.arange(0.1, 0.96, 0.05)
-        for th in thresholds:
-            flagged = df[score_col] >= th
-            daily_counts = self._daily_counts(df, score_col, th)
-            avg_daily = daily_counts.mean() if len(daily_counts) else 0
-            precision_proxy = df.loc[flagged, "label"].isin(CONFIG["risky_labels"]).mean() if flagged.sum() > 0 else 0
-            rows.append(
-                {
-                    "threshold": round(float(th), 2),
-                    "avg_daily_alerts": round(float(avg_daily), 2),
-                    "within_capacity": int(avg_daily <= daily_capacity),
-                    "precision_proxy": round(float(precision_proxy), 4),
-                    "flagged_volume": int(flagged.sum()),
-                }
-            )
-        return pd.DataFrame(rows)
+        summary = self._threshold_metrics(df, score_col, thresholds)
+        summary["within_capacity"] = (summary["avg_daily_alerts"] <= daily_capacity).astype(int)
+        return summary[["threshold", "avg_daily_alerts", "within_capacity", "precision_proxy", "flagged_volume"]]
 
     def optimize_threshold_by_capacity(self, df, score_col, daily_capacity):
         if df.empty or score_col not in df.columns:
             return {"selected_threshold": None, "avg_daily_alerts": None}
 
-        thresholds = np.arange(0.1, 0.96, 0.01)
-        candidates = []
-        for th in thresholds:
-            daily_counts = self._daily_counts(df, score_col, th)
-            avg_daily = daily_counts.mean() if len(daily_counts) else 0
-            if avg_daily <= daily_capacity:
-                candidates.append((th, avg_daily))
-        if not candidates:
+        thresholds = np.arange(0.1, 0.96, 0.02)
+        summary = self._threshold_metrics(df, score_col, thresholds)
+        candidates = summary[summary["avg_daily_alerts"] <= daily_capacity]
+        if candidates.empty:
             return {"selected_threshold": None, "avg_daily_alerts": None}
-        selected = sorted(candidates, key=lambda x: x[0], reverse=True)[0]
-        return {"selected_threshold": round(float(selected[0]), 2), "avg_daily_alerts": round(float(selected[1]), 2)}
+        selected = candidates.sort_values("threshold", ascending=False).iloc[0]
+        return {"selected_threshold": round(float(selected["threshold"]), 2), "avg_daily_alerts": round(float(selected["avg_daily_alerts"]), 2)}
 
     def channel_specific_thresholds(self, df, score_col, daily_capacity):
         if df.empty or score_col not in df.columns or "channel" not in df.columns:
@@ -197,18 +248,14 @@ class AlertEngine:
         rows = []
         alloc = max(1, daily_capacity // max(1, len(prob_cols)))
         for col in prob_cols:
-            thresholds = np.arange(0.1, 0.96, 0.01)
-            found = None
-            for th in thresholds:
-                daily_counts = self._daily_counts(df, col, th)
-                avg_daily = daily_counts.mean() if len(daily_counts) else 0
-                if avg_daily <= alloc:
-                    found = (th, avg_daily)
+            summary = self._threshold_metrics(df, col, np.arange(0.1, 0.96, 0.02))
+            candidates = summary[summary["avg_daily_alerts"] <= alloc]
+            found = candidates.sort_values("threshold", ascending=False).iloc[0] if not candidates.empty else None
             rows.append(
                 {
                     "probability_column": col,
-                    "selected_threshold": round(float(found[0]), 2) if found else None,
-                    "avg_daily_alerts": round(float(found[1]), 2) if found else None,
+                    "selected_threshold": round(float(found["threshold"]), 2) if found is not None else None,
+                    "avg_daily_alerts": round(float(found["avg_daily_alerts"]), 2) if found is not None else None,
                 }
             )
         return pd.DataFrame(rows)
@@ -218,15 +265,20 @@ class AlertEngine:
         out = self.build_reasoning(test_df.copy())
         for i, cls in enumerate(model6_artifacts.label_encoder.classes_):
             out[f"prob_{cls}"] = test_prob[:, i] if len(test_prob) else 0.0
-        out["channel_exposure"] = out.groupby("customer_id")["channel"].transform(
-            lambda x: ",".join(sorted(set(map(str, x.dropna()))))
+        channel_exposure_map = out.groupby("customer_id")["channel"].agg(
+            lambda values: ",".join(sorted({str(item) for item in values.dropna()}))
         )
+        out["channel_exposure"] = out["customer_id"].map(channel_exposure_map).fillna("")
         out["risk_tier"] = pd.cut(
             out["final_mule_score"],
             bins=[-0.001, 0.55, 0.75, 1.0],
             labels=["LOW", "MEDIUM", "HIGH"],
         ).astype(str)
-        out["priority_band"] = out["final_mule_score"].apply(assign_priority_band)
+        out["priority_band"] = np.select(
+            [out["final_mule_score"] >= 0.85, out["final_mule_score"] >= 0.65],
+            ["P1", "P2"],
+            default="P3",
+        )
         out["alert_rank"] = out["final_mule_score"].rank(method="dense", ascending=False).astype(int)
         alert_output = out[
             [

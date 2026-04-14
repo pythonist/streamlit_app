@@ -7,6 +7,15 @@ from utils import print_step
 
 
 class GraphAnalytics:
+    SAMPLE_CAPS = {
+        "graph_sample_size": 900,
+        "ring_sample_size": 450,
+    }
+    PAGERANK_NODE_LIMIT = 850
+    CLUSTERING_NODE_LIMIT = 950
+    CORE_NUMBER_NODE_LIMIT = 1200
+    CYCLE_BASIS_NODE_LIMIT = 40
+
     def _node_type(self, node_id):
         text = str(node_id)
         prefix, _, _ = text.partition("::")
@@ -20,7 +29,9 @@ class GraphAnalytics:
         }.get(prefix, prefix or "node")
 
     def _pick_sample(self, df, sample_key):
-        sample_size = min(int(CONFIG.get(sample_key, len(df))), len(df))
+        configured_size = int(CONFIG.get(sample_key, len(df)))
+        hard_cap = int(self.SAMPLE_CAPS.get(sample_key, configured_size))
+        sample_size = min(configured_size, hard_cap, len(df))
         if sample_size <= 0:
             return df.head(0).copy()
         if sample_size == len(df):
@@ -30,6 +41,20 @@ class GraphAnalytics:
     def _ip_column(self, df):
         return "device_ip_address" if "device_ip_address" in df.columns else "ip_address"
 
+    def _build_edge_frame(self, left, right, weights):
+        edge_df = pd.DataFrame({"u": left, "v": right, "weight": weights})
+        edge_df = edge_df.dropna(subset=["u", "v"])
+        if edge_df.empty:
+            return edge_df
+
+        edge_df["u"] = edge_df["u"].astype(str)
+        edge_df["v"] = edge_df["v"].astype(str)
+        edge_df = edge_df[(edge_df["u"] != "nan") & (edge_df["v"] != "nan")]
+        if edge_df.empty:
+            return edge_df
+
+        return edge_df.groupby(["u", "v"], as_index=False, sort=False)["weight"].sum()
+
     def _build_graph(self, df):
         graph = nx.Graph()
         ip_col = self._ip_column(df)
@@ -37,26 +62,29 @@ class GraphAnalytics:
         def node_key(prefix, series):
             return prefix + "::" + series.astype(str)
 
-        def add_edges(left, right, weights):
-            for u, v, weight in zip(left, right, weights):
-                if pd.isna(u) or pd.isna(v):
-                    continue
-                if graph.has_edge(u, v):
-                    graph[u][v]["weight"] += float(weight)
-                else:
-                    graph.add_edge(u, v, weight=float(weight))
-
         amount = df.get("amount", pd.Series(0, index=df.index)).fillna(0).astype(float)
-        add_edges(node_key("cust", df["customer_id"]), node_key("acct", df["account_id"]), amount)
+        edge_frames = [
+            self._build_edge_frame(node_key("cust", df["customer_id"]), node_key("acct", df["account_id"]), amount),
+        ]
 
         if "device_id" in df.columns:
-            add_edges(node_key("cust", df["customer_id"]), node_key("dev", df["device_id"]), amount)
+            edge_frames.append(self._build_edge_frame(node_key("cust", df["customer_id"]), node_key("dev", df["device_id"]), amount))
         if ip_col in df.columns:
-            add_edges(node_key("cust", df["customer_id"]), node_key("ip", df[ip_col]), amount)
+            edge_frames.append(self._build_edge_frame(node_key("cust", df["customer_id"]), node_key("ip", df[ip_col]), amount))
         if "counterparty_id" in df.columns:
-            add_edges(node_key("acct", df["account_id"]), node_key("cp", df["counterparty_id"]), amount)
+            edge_frames.append(self._build_edge_frame(node_key("acct", df["account_id"]), node_key("cp", df["counterparty_id"]), amount))
         if "merchant_id" in df.columns:
-            add_edges(node_key("cust", df["customer_id"]), node_key("mch", df["merchant_id"]), amount)
+            edge_frames.append(self._build_edge_frame(node_key("cust", df["customer_id"]), node_key("mch", df["merchant_id"]), amount))
+
+        edge_frames = [frame for frame in edge_frames if frame is not None and not frame.empty]
+        if not edge_frames:
+            return graph, ip_col
+
+        edge_df = pd.concat(edge_frames, ignore_index=True)
+        if len(edge_frames) > 1:
+            edge_df = edge_df.groupby(["u", "v"], as_index=False, sort=False)["weight"].sum()
+
+        graph.add_weighted_edges_from(edge_df.itertuples(index=False, name=None))
 
         return graph, ip_col
 
@@ -71,10 +99,22 @@ class GraphAnalytics:
         if graph.number_of_nodes() == 0:
             return df.copy(), pd.DataFrame()
 
-        degree_cent = nx.degree_centrality(graph)
-        clustering = nx.clustering(graph) if graph.number_of_nodes() <= 2200 else {}
-        pagerank = nx.pagerank(graph, alpha=0.85, max_iter=60) if graph.number_of_nodes() <= 1800 else {}
-        core_number = nx.core_number(graph) if graph.number_of_nodes() <= 3000 and graph.number_of_edges() > 0 else {}
+        degree_map = dict(graph.degree())
+        denom = max(graph.number_of_nodes() - 1, 1)
+        degree_cent = {node: degree / denom for node, degree in degree_map.items()}
+        weighted_degree = dict(graph.degree(weight="weight"))
+        clustering = nx.clustering(graph) if graph.number_of_nodes() <= self.CLUSTERING_NODE_LIMIT else {}
+        if graph.number_of_nodes() <= self.PAGERANK_NODE_LIMIT:
+            try:
+                pagerank = nx.pagerank(graph, alpha=0.85, max_iter=25, tol=1.0e-04)
+            except Exception:
+                pagerank = {}
+        else:
+            pagerank = {}
+        if not pagerank:
+            total_weight = sum(weighted_degree.values()) or 1.0
+            pagerank = {node: float(weighted_degree.get(node, 0.0) / total_weight) for node in graph.nodes()}
+        core_number = nx.core_number(graph) if graph.number_of_nodes() <= self.CORE_NUMBER_NODE_LIMIT and graph.number_of_edges() > 0 else {}
 
         community_map = {}
         component_size_map = {}
@@ -83,12 +123,15 @@ class GraphAnalytics:
         cycle_nodes = set()
         for component_id, component in enumerate(nx.connected_components(graph)):
             subgraph = graph.subgraph(component)
+            component_size = len(component)
+            component_edges = subgraph.number_of_edges()
+            component_density = float(nx.density(subgraph)) if component_size > 1 else 0.0
             for node in component:
                 community_map[node] = component_id
-                component_size_map[node] = len(component)
-                component_edge_map[node] = subgraph.number_of_edges()
-                component_density_map[node] = float(nx.density(subgraph)) if subgraph.number_of_nodes() > 1 else 0.0
-            if subgraph.number_of_edges() >= subgraph.number_of_nodes():
+                component_size_map[node] = component_size
+                component_edge_map[node] = component_edges
+                component_density_map[node] = component_density
+            if component_edges >= component_size:
                 cycle_nodes.update(component)
 
         nodes = list(graph.nodes())
@@ -100,7 +143,7 @@ class GraphAnalytics:
                 "node_id": nodes,
                 "graph_node_type": node_types,
                 "graph_degree_centrality": [degree_cent.get(node, 0.0) for node in nodes],
-                "graph_clustering": [clustering.get(node, 0.0) for node in nodes],
+                "graph_clustering": [clustering.get(node, component_density_map.get(node, 0.0)) for node in nodes],
                 "graph_pagerank": [pagerank.get(node, 0.0) for node in nodes],
                 "graph_community_id": [community_map.get(node, -1) for node in nodes],
                 "graph_cycle_flag": [int(node in cycle_nodes) for node in nodes],
@@ -108,12 +151,13 @@ class GraphAnalytics:
                 "graph_component_edges": [component_edge_map.get(node, 0) for node in nodes],
                 "graph_component_density": [component_density_map.get(node, 0.0) for node in nodes],
                 "graph_core_number": [core_number.get(node, 0) for node in nodes],
-                "graph_degree_rank": [round((graph.degree(node) / max_degree), 4) if max_degree else 0.0 for node in nodes],
+                "graph_degree_rank": [round((degree_map.get(node, 0) / max_degree), 4) if max_degree else 0.0 for node in nodes],
             }
         )
 
-        out = df.copy()
+        out = df.copy().reset_index(drop=True)
         graph_index = graph_features.set_index("node_id")
+        merged_frames = []
 
         for prefix, raw_col in [
             ("cust", "customer_id"),
@@ -128,7 +172,10 @@ class GraphAnalytics:
             node_col = f"{prefix}_node"
             out[node_col] = prefix + "::" + out[raw_col].astype(str)
             merged = graph_index.reindex(out[node_col]).reset_index(drop=True).add_prefix(f"{prefix}_")
-            out = pd.concat([out.reset_index(drop=True), merged.reset_index(drop=True)], axis=1)
+            merged_frames.append(merged)
+
+        if merged_frames:
+            out = pd.concat([out] + merged_frames, axis=1)
 
         return out, graph_features
 
@@ -144,17 +191,19 @@ class GraphAnalytics:
 
         sample = self._pick_sample(df, "ring_sample_size")
         graph = nx.Graph()
-        edge_amount = {}
+        ring_sample = sample[["account_id", "counterparty_id", "amount"]].dropna(subset=["account_id", "counterparty_id"]).copy()
+        if ring_sample.empty:
+            out = df.copy()
+            out["ring_count"] = 0
+            out["ring_max_risk_score"] = 0.0
+            out["ring_max_member_count"] = 0
+            return out, pd.DataFrame()
 
-        ring_sample = sample[["account_id", "counterparty_id", "amount"]].copy()
-        for account_id, counterparty_id, amount_raw in ring_sample.itertuples(index=False, name=None):
-            if pd.isna(account_id) or pd.isna(counterparty_id):
-                continue
-            u = str(account_id)
-            v = str(counterparty_id)
-            amount = float(amount_raw or 0)
-            graph.add_edge(u, v, weight=graph.get_edge_data(u, v, default={}).get("weight", 0.0) + amount)
-            edge_amount[(u, v)] = edge_amount.get((u, v), 0.0) + amount
+        ring_sample["account_id"] = ring_sample["account_id"].astype(str)
+        ring_sample["counterparty_id"] = ring_sample["counterparty_id"].astype(str)
+        ring_sample["amount"] = pd.to_numeric(ring_sample["amount"], errors="coerce").fillna(0.0)
+        ring_edges = ring_sample.groupby(["account_id", "counterparty_id"], as_index=False, sort=False)["amount"].sum()
+        graph.add_weighted_edges_from(ring_edges.itertuples(index=False, name=None))
 
         candidates = []
         max_rings = int(CONFIG.get("max_rings", 25))
@@ -165,7 +214,7 @@ class GraphAnalytics:
             if subgraph.number_of_edges() < len(component):
                 continue
 
-            cycles = nx.cycle_basis(subgraph) if subgraph.number_of_nodes() <= 150 else []
+            cycles = nx.cycle_basis(subgraph) if subgraph.number_of_nodes() <= self.CYCLE_BASIS_NODE_LIMIT else []
             if not cycles and subgraph.number_of_edges() < len(component) + 1:
                 continue
 
@@ -259,30 +308,30 @@ class GraphAnalytics:
         if ring_df.empty:
             return out, ring_df
 
-        ring_memberships = []
-        for _, ring in ring_df.iterrows():
-            members = set(ring["ring_members"])
-            ring_memberships.append(
-                {
-                    "members": members,
-                    "risk_score": ring["ring_risk_score"],
-                    "member_count": ring["ring_member_count"],
-                }
-            )
+        member_to_ring_ids = {}
+        ring_stats = {}
+        for ring_idx, ring in enumerate(ring_df.itertuples(index=False)):
+            members = set(ring.ring_members)
+            ring_stats[ring_idx] = {
+                "risk_score": float(ring.ring_risk_score),
+                "member_count": int(ring.ring_member_count),
+            }
+            for member in members:
+                member_to_ring_ids.setdefault(str(member), set()).add(ring_idx)
 
-        counts = []
-        max_scores = []
-        max_sizes = []
-        for _, row in out.iterrows():
-            row_members = {str(row.get("account_id", "")), str(row.get("counterparty_id", ""))}
-            matched = [ring for ring in ring_memberships if row_members & ring["members"]]
-            counts.append(len(matched))
-            max_scores.append(max([ring["risk_score"] for ring in matched], default=0.0))
-            max_sizes.append(max([ring["member_count"] for ring in matched], default=0))
+        account_sets = out["account_id"].astype(str).map(lambda value: member_to_ring_ids.get(value, set()))
+        counterparty_sets = out["counterparty_id"].astype(str).map(lambda value: member_to_ring_ids.get(value, set()))
+        matched_ring_sets = [acct_set | cp_set for acct_set, cp_set in zip(account_sets, counterparty_sets)]
 
-        out["ring_count"] = counts
-        out["ring_max_risk_score"] = max_scores
-        out["ring_max_member_count"] = max_sizes
+        out["ring_count"] = [len(ring_ids) for ring_ids in matched_ring_sets]
+        out["ring_max_risk_score"] = [
+            max((ring_stats[ring_id]["risk_score"] for ring_id in ring_ids), default=0.0)
+            for ring_ids in matched_ring_sets
+        ]
+        out["ring_max_member_count"] = [
+            max((ring_stats[ring_id]["member_count"] for ring_id in ring_ids), default=0)
+            for ring_ids in matched_ring_sets
+        ]
 
         if "ring_members" in ring_df.columns:
             ring_df = ring_df.copy()
