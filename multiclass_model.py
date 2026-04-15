@@ -179,7 +179,7 @@ class MulticlassModel:
         calibrated_model = champion_model
         calibration_method = CONFIG.get("calibration_method", "sigmoid")
         try:
-            calibrated_model = CalibratedClassifierCV(self._build_champion_model(), method=calibration_method, cv=3)
+            calibrated_model = CalibratedClassifierCV(self._build_champion_model(), method=calibration_method, cv=2)
             calibrated_model.fit(X_train_proc, y_train)
         except Exception as exc:
             print(f"Calibration fallback activated: {exc}")
