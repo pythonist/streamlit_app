@@ -581,6 +581,131 @@ button[kind="secondary"] {{
     background: rgba(34, 168, 97, 0.08);
     border-left-color: {PWC_COLORS["success"]};
 }}
+
+/* ── Live training log ── */
+.train-log-wrap {{
+    background: #0D0D0D;
+    border: 1px solid #1E1E1E;
+    border-radius: 14px;
+    padding: 1rem 1.25rem;
+    margin: 0.75rem 0;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.78rem;
+    max-height: 360px;
+    overflow-y: auto;
+}}
+
+.log-row {{
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.38rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+    line-height: 1.4;
+}}
+
+.log-row:last-child {{ border-bottom: none; }}
+
+.log-dot {{
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}}
+.log-dot.done   {{ background: {PWC_COLORS["success"]}; }}
+.log-dot.active {{ background: {PWC_COLORS["primary"]}; animation: pulse-dot 1s infinite; }}
+.log-dot.pending {{ background: #2A2A2A; }}
+
+.log-label {{ color: #E0E0E0; flex: 1; }}
+.log-time  {{ color: #666; font-size: 0.7rem; }}
+.log-badge {{ font-size: 0.65rem; padding: 0.18rem 0.55rem; border-radius: 99px; font-weight: 700; }}
+.log-badge.done    {{ background: rgba(34,168,97,.15); color: {PWC_COLORS["success"]}; }}
+.log-badge.active  {{ background: rgba(208,74,2,.15); color: {PWC_COLORS["primary"]}; }}
+.log-badge.pending {{ background: #1E1E1E; color: #555; }}
+
+@keyframes pulse-dot {{
+    0%,100% {{ opacity:1; transform:scale(1); }}
+    50%      {{ opacity:0.5; transform:scale(1.35); }}
+}}
+
+/* ── Pipeline card grid ── */
+.pipeline-grid {{
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.65rem;
+    margin: 0.75rem 0;
+}}
+
+.pipe-cell {{
+    background: #141414;
+    border: 1px solid #222;
+    border-radius: 12px;
+    padding: 0.85rem 1rem;
+    position: relative;
+    overflow: hidden;
+    transition: border-color .25s;
+}}
+
+.pipe-cell.done   {{ border-color: rgba(34,168,97,.3); }}
+.pipe-cell.active {{ border-color: rgba(208,74,2,.5);  animation: glow-border 1.5s ease-in-out infinite; }}
+.pipe-cell.skip   {{ opacity: 0.45; }}
+
+@keyframes glow-border {{
+    0%,100% {{ box-shadow: 0 0 0 rgba(208,74,2,0); }}
+    50%      {{ box-shadow: 0 0 14px rgba(208,74,2,.25); }}
+}}
+
+.pipe-cell .pc-name  {{ font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:#888; margin-bottom:.25rem; }}
+.pipe-cell .pc-value {{ font-size:1.1rem; font-weight:700; color:#fff; }}
+.pipe-cell .pc-sub   {{ font-size:.68rem; color:#555; margin-top:.12rem; }}
+.pipe-cell.done  .pc-value {{ color: {PWC_COLORS["success"]}; }}
+.pipe-cell.active .pc-value {{ color: {PWC_COLORS["primary"]}; }}
+
+/* ── Alert feed ── */
+.alert-feed {{
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}}
+
+.alert-feed-row {{
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 0.9rem;
+    border-radius: 10px;
+    border: 1px solid #1E1E1E;
+    background: #111;
+    transition: background .15s;
+    font-size: 0.82rem;
+}}
+
+.alert-feed-row:hover {{ background: #181818; }}
+
+.risk-pill {{
+    display: inline-flex; align-items: center;
+    padding: .18rem .55rem; border-radius: 99px;
+    font-size: .64rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em;
+    flex-shrink: 0;
+}}
+
+.risk-pill.P1 {{ background: rgba(211,47,47,.18); color: {PWC_COLORS["danger"]}; }}
+.risk-pill.P2 {{ background: rgba(232,163,23,.18); color: {PWC_COLORS["warning"]}; }}
+.risk-pill.P3 {{ background: rgba(34,168,97,.18);  color: {PWC_COLORS["success"]}; }}
+
+.score-bar-wrap {{ flex: 1; height: 4px; background: #1E1E1E; border-radius: 2px; overflow: hidden; }}
+.score-bar      {{ height: 100%; border-radius: 2px; }}
+
+/* ── Stat counter ticker ── */
+.stat-ticker {{
+    display: inline-flex; gap: 1.5rem;
+    background: rgba(208,74,2,.07);
+    border: 1px solid rgba(208,74,2,.18);
+    border-radius: 12px;
+    padding: .55rem 1.1rem;
+    margin-bottom: 1rem;
+}}
+
+.ticker-item {{ text-align: center; }}
+.ticker-item .tv {{ font-size: 1.15rem; font-weight: 800; color: {PWC_COLORS["primary"]}; }}
+.ticker-item .tl {{ font-size: .62rem; text-transform: uppercase; letter-spacing: .06em; color: #888; margin-top: .1rem; }}
 </style>
 """
 
@@ -2273,6 +2398,37 @@ def compute_lime_explanation(processed_matrix, bundle, row_position, predicted_c
     return lime_df
 
 
+def render_pipeline_live_log(steps_done, steps_active, steps_pending, timings):
+    """Render an inline live log card showing pipeline step status."""
+    rows_html = ""
+    for step_name, step_label in steps_done:
+        t = timings.get(step_name, 0)
+        rows_html += f"""
+        <div class="log-row">
+            <div class="log-dot done"></div>
+            <div class="log-label">{step_label}</div>
+            <div class="log-time">{t:.1f}s</div>
+            <div class="log-badge done">DONE</div>
+        </div>"""
+    for step_name, step_label in steps_active:
+        rows_html += f"""
+        <div class="log-row">
+            <div class="log-dot active"></div>
+            <div class="log-label">{step_label}</div>
+            <div class="log-time">running…</div>
+            <div class="log-badge active">ACTIVE</div>
+        </div>"""
+    for step_name, step_label in steps_pending:
+        rows_html += f"""
+        <div class="log-row">
+            <div class="log-dot pending"></div>
+            <div class="log-label">{step_label}</div>
+            <div class="log-time">—</div>
+            <div class="log-badge pending">QUEUED</div>
+        </div>"""
+    return f'<div class="train-log-wrap">{rows_html}</div>'
+
+
 def run_demo_pipeline():
     import random
 
@@ -2289,47 +2445,75 @@ def run_demo_pipeline():
     random.seed(CONFIG["random_state"])
     st.session_state.step_times = {}
     progress = st.progress(0)
-    status = st.empty()
+    log_slot = st.empty()
 
-    def timed_step(label, progress_value, status_text, callback):
-        status.text(status_text)
+    ALL_STEPS = [
+        ("Raw Tables",    "Generate synthetic raw tables"),
+        ("Txn Tables",    "Generate transaction channels"),
+        ("Entity Views",  "Build entity views"),
+        ("Unified Events","Build unified event layer"),
+        ("Single View",   "Build customer single view"),
+        ("EDA",           "Run data quality checks & imputation"),
+        ("Features",      "Engineer 80+ behavioral signals"),
+        ("Graph",         "Compute graph analytics (PageRank, communities)"),
+        ("Rings",         "Detect dense ring candidates"),
+        ("Split",         "Prepare train / validation / test windows"),
+        ("Hazard",        "Score emerging mule risk (Cox hazard)"),
+        ("HMM",           "Hidden Markov sequence anomaly detection"),
+        ("Sequence",      "Prepare sequence intelligence outputs"),
+        ("Classifier",    "Train champion + challenger classifiers"),
+        ("Decision",      "Run decision engine & score enrichment"),
+        ("Alerts",        "Package explainable priority alerts"),
+    ]
+    completed = []
+
+    def timed_step(label, progress_value, callback):
+        # find pending steps after current
+        current_idx = next((i for i, (k, _) in enumerate(ALL_STEPS) if k == label), 0)
+        active_steps = [(ALL_STEPS[current_idx][0], ALL_STEPS[current_idx][1])]
+        pending_steps = [(k, v) for k, v in ALL_STEPS[current_idx + 1:]]
+        log_slot.markdown(
+            render_pipeline_live_log(completed[:], active_steps, pending_steps, st.session_state.step_times),
+            unsafe_allow_html=True,
+        )
         start = time.time()
         result = callback()
-        st.session_state.step_times[label] = time.time() - start
+        elapsed = time.time() - start
+        st.session_state.step_times[label] = elapsed
+        completed.append((label, next(v for k, v in ALL_STEPS if k == label)))
         progress.progress(progress_value)
         return result
 
     ingestion = DataIngestion()
-    raw_tables = timed_step("Raw Tables", 8, "Generating synthetic raw tables...", ingestion.generate_raw_tables)
-    txn_tables = timed_step("Txn Tables", 16, "Generating transaction channels...", lambda: ingestion.generate_transaction_tables(raw_tables))
+    raw_tables = timed_step("Raw Tables", 8, ingestion.generate_raw_tables)
+    txn_tables = timed_step("Txn Tables", 16, lambda: ingestion.generate_transaction_tables(raw_tables))
 
     entity = EntityResolution()
-    entity_views = timed_step("Entity Views", 26, "Building entity views...", lambda: entity.build_entity_views(raw_tables))
-    events = timed_step("Unified Events", 34, "Building unified event layer...", lambda: entity.build_unified_events(txn_tables))
-    single_view = timed_step("Single View", 42, "Building customer single view...", lambda: entity.build_single_view(events, entity_views))
+    entity_views = timed_step("Entity Views", 26, lambda: entity.build_entity_views(raw_tables))
+    events = timed_step("Unified Events", 34, lambda: entity.build_unified_events(txn_tables))
+    single_view = timed_step("Single View", 42, lambda: entity.build_single_view(events, entity_views))
 
     feat = FeatureEngineering()
-    clean_df = timed_step("EDA", 50, "Running data quality checks...", lambda: feat.run_eda_and_imputation(single_view))
-    feature_df = timed_step("Features", 58, "Engineering behavioral signals...", lambda: feat.feature_engineering(clean_df))
+    clean_df = timed_step("EDA", 50, lambda: feat.run_eda_and_imputation(single_view))
+    feature_df = timed_step("Features", 58, lambda: feat.feature_engineering(clean_df))
 
     graph = GraphAnalytics()
-    graph_feature_df, graph_features = timed_step("Graph", 68, "Computing graph analytics...", lambda: graph.model1_graph_analytics(feature_df))
-    graph_feature_df, ring_df = timed_step("Rings", 76, "Detecting dense ring candidates...", lambda: graph.model2_ring_detection(graph_feature_df))
+    graph_feature_df, graph_features = timed_step("Graph", 68, lambda: graph.model1_graph_analytics(feature_df))
+    graph_feature_df, ring_df = timed_step("Rings", 76, lambda: graph.model2_ring_detection(graph_feature_df))
 
     modeler = MulticlassModel()
     train_df, valid_df, test_df = timed_step(
         "Split",
         81,
-        "Preparing train, validation, and test windows...",
         lambda: modeler.split_time_based(graph_feature_df, CONFIG["train_end"], CONFIG["valid_end"]),
     )
 
     seq = SequenceModels()
-    model3, train_df, valid_df, test_df = timed_step("Hazard", 85, "Scoring emerging mule risk...", lambda: seq.model3_hazard(train_df, valid_df, test_df))
-    model4, train_df, valid_df, test_df = timed_step("HMM", 88, "Running sequence anomaly detection...", lambda: seq.model4_hmm(train_df, valid_df, test_df))
-    model5_outputs = timed_step("Sequence", 91, "Preparing sequence intelligence outputs...", lambda: seq.model5_lstm_and_transformer(train_df, valid_df, test_df))
+    model3, train_df, valid_df, test_df = timed_step("Hazard", 85, lambda: seq.model3_hazard(train_df, valid_df, test_df))
+    model4, train_df, valid_df, test_df = timed_step("HMM", 88, lambda: seq.model4_hmm(train_df, valid_df, test_df))
+    model5_outputs = timed_step("Sequence", 91, lambda: seq.model5_lstm_and_transformer(train_df, valid_df, test_df))
 
-    model_results = timed_step("Classifier", 96, "Training champion and challenger models...", lambda: modeler.model6_multiclass(train_df, valid_df, test_df))
+    model_results = timed_step("Classifier", 96, lambda: modeler.model6_multiclass(train_df, valid_df, test_df))
     (
         model6_artifacts,
         feature_cols,
@@ -2348,18 +2532,22 @@ def run_demo_pipeline():
     test_df = timed_step(
         "Decision",
         98,
-        "Running decision engine...",
         lambda: alert_engine.model7_decision_engine(test_df, test_prob, model6_artifacts, model5_outputs),
     )
     alert_output, threshold_tbl, channel_thresholds_tbl, class_thresholds_tbl, _enriched_alert_df, threshold_opt = timed_step(
         "Alerts",
         100,
-        "Packaging explainable alerts...",
         lambda: alert_engine.model8_alert_pack(test_df, test_prob, model6_artifacts),
     )
 
     feedback = FeedbackLoop()
     feedback_outputs = feedback.weak_supervision_and_feedback(graph_feature_df, alert_output)
+
+    # Show final completed log
+    log_slot.markdown(
+        render_pipeline_live_log(completed[:], [], [], st.session_state.step_times),
+        unsafe_allow_html=True,
+    )
 
     st.session_state.raw_tables = raw_tables
     st.session_state.txn_tables = txn_tables
@@ -2398,7 +2586,6 @@ def run_demo_pipeline():
         "event_count": len(events),
     }
 
-    status.empty()
     progress.empty()
 
 
@@ -2552,6 +2739,23 @@ def page_overview():
                 st.rerun()
 
     render_section("Workspace Snapshot", "dashboard")
+
+    # Pipeline status grid
+    step_map = get_pipeline_step_map()
+    grid_html = '<div class="pipeline-grid">'
+    step_icons = ["storage", "hub", "functions", "share", "model_training", "notifications", "feedback", "cloud_upload"]
+    for idx, (label, done) in enumerate(step_map):
+        cls = "done" if done else "skip"
+        icon = step_icons[idx]
+        val = "✓ Complete" if done else "Pending"
+        grid_html += f"""
+        <div class="pipe-cell {cls}">
+            <div class="pc-name">{label}</div>
+            <div class="pc-value">{val}</div>
+        </div>"""
+    grid_html += "</div>"
+    st.markdown(grid_html, unsafe_allow_html=True)
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         render_kpi("timeline", "Events", f"{metrics['events']:,}" if metrics["events"] else "Pending", "Unified customer activity", "orange")
@@ -2568,12 +2772,32 @@ def page_overview():
 
     details_col1, details_col2 = st.columns([1.4, 1.0], gap="large")
     with details_col1:
-        render_section("Latest Run Story", "auto_awesome")
+        render_section("Top Risk Alerts", "notification_important")
         if st.session_state.alert_output is None:
             st.info("Run the pipeline to populate the workspace, metrics, and drill-down pages.")
         else:
-            alert_preview = st.session_state.alert_output.sort_values("final_mule_score", ascending=False).head(15)
-            st.dataframe(alert_preview, use_container_width=True, height=360)
+            alert_preview = st.session_state.alert_output.sort_values("final_mule_score", ascending=False).head(12)
+            feed_html = '<div class="alert-feed">'
+            for _, row in alert_preview.iterrows():
+                score = float(row.get("final_mule_score", 0))
+                priority = str(row.get("priority_band", row.get("risk_tier", "P3")))
+                cust = str(row.get("customer_id", "—"))[:14]
+                reason = str(row.get("primary_reason", row.get("alert_reason", "—")))[:48]
+                channel = str(row.get("channel", "—"))
+                bar_color = "#D32F2F" if priority == "P1" else ("#E8A317" if priority == "P2" else "#22A861")
+                feed_html += f"""
+                <div class="alert-feed-row">
+                    <div class="risk-pill {priority}">{priority}</div>
+                    <div style="flex:0 0 100px; font-size:.78rem; color:#ccc; font-family:monospace;">{cust}</div>
+                    <div style="flex:1; font-size:.8rem; color:#aaa; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{reason}</div>
+                    <div style="flex:0 0 60px; font-size:.72rem; color:#666;">{channel}</div>
+                    <div class="score-bar-wrap" style="flex:0 0 80px;">
+                        <div class="score-bar" style="width:{score*100:.0f}%; background:{bar_color};"></div>
+                    </div>
+                    <div style="flex:0 0 44px; font-size:.78rem; font-weight:700; color:#fff; text-align:right;">{score:.2f}</div>
+                </div>"""
+            feed_html += "</div>"
+            st.markdown(feed_html, unsafe_allow_html=True)
     with details_col2:
         render_section("Operational View", "monitoring")
         if st.session_state.step_times:
@@ -3536,6 +3760,22 @@ def page_model_training():
         st.warning("Complete previous steps first")
         return
 
+    # Performance tip
+    theme = current_theme()
+    est = int(CONFIG.get("classifier_estimators", 220))
+    if est > 150:
+        st.markdown(f"""
+        <div style="display:flex;align-items:center;gap:.75rem;padding:.7rem 1rem;border-radius:12px;
+                    background:rgba(255,182,0,.07);border:1px solid rgba(255,182,0,.22);margin-bottom:.75rem;">
+            <span class="material-icons-outlined" style="color:#FFB600;font-size:1.1rem;">bolt</span>
+            <div style="font-size:.82rem;color:{theme['muted']};">
+                <strong style="color:{theme['text']};">Speed tip:</strong>
+                Current estimators = <strong>{est}</strong>.
+                Switch to the <strong>Fast</strong> profile (160 estimators) or reduce estimators below to cut training time by ~35%.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
     render_section("Algorithm Selection", "model_training")
     render_section_note("Pick the model family and training controls first so the champion/challenger comparison stays consistent.")
 
@@ -3576,29 +3816,52 @@ def page_model_training():
     CONFIG["valid_end"] = str(valid_end)
 
     render_section("Training Pipeline", "play_arrow")
-    render_section_note("Run each stage separately when you want to inspect timing, or use Run All for a complete pass.")
+    render_section_note("Run each stage separately when you want to inspect timing, or use **Run All** for a complete pass with a live step-by-step execution log.")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        run_split = st.button("Split Data", type="primary", use_container_width=True)
+        run_split = st.button("① Split Data", type="primary", use_container_width=True)
     with col2:
-        run_seq = st.button("Sequence Models", type="primary", use_container_width=True)
+        run_seq = st.button("② Sequence Models", type="primary", use_container_width=True)
     with col3:
-        run_cls = st.button("Train Classifier", type="primary", use_container_width=True)
+        run_cls = st.button("③ Train Classifier", type="primary", use_container_width=True)
     with col4:
-        run_all = st.button("Run All", type="primary", use_container_width=True)
+        run_all = st.button("⚡ Run All", type="primary", use_container_width=True)
+
+    # ── Live execution log container ──
+    training_log = st.empty()
+
+    TRAIN_STEPS = [
+        ("Split",      "Time-based train/valid/test split"),
+        ("Hazard",     "Cox proportional hazard scoring"),
+        ("HMM",        "Hidden Markov sequence model"),
+        ("Sequence",   "Sequence intelligence outputs"),
+        ("Classifier", "Champion + challenger classifiers"),
+    ]
+    train_done = []
+
+    def _render_training_log(active_key=None):
+        done_steps  = [(k, v) for k, v in TRAIN_STEPS if k in [s[0] for s in train_done]]
+        active_steps = [(k, v) for k, v in TRAIN_STEPS if k == active_key] if active_key else []
+        pending_steps = [(k, v) for k, v in TRAIN_STEPS
+                         if k not in [s[0] for s in train_done] and k != active_key]
+        training_log.markdown(
+            render_pipeline_live_log(done_steps, active_steps, pending_steps, st.session_state.step_times),
+            unsafe_allow_html=True,
+        )
 
     if run_split or run_all:
         from multiclass_model import MulticlassModel
         modeler = MulticlassModel()
-
-        with st.spinner("Splitting..."):
+        _render_training_log("Split")
+        with st.spinner("Splitting data..."):
             start = time.time()
             train_df, valid_df, test_df = modeler.split_time_based(working_df, str(train_end), str(valid_end))
             st.session_state.step_times["Split"] = time.time() - start
             st.session_state.train_df = train_df
             st.session_state.valid_df = valid_df
             st.session_state.test_df = test_df
+        train_done.append(("Split", ""))
 
     if run_seq or run_all:
         if st.session_state.train_df is None:
@@ -3608,19 +3871,33 @@ def page_model_training():
             seq = SequenceModels()
             train_df, valid_df, test_df = st.session_state.train_df, st.session_state.valid_df, st.session_state.test_df
 
-            with st.spinner("Training sequence models..."):
+            _render_training_log("Hazard")
+            with st.spinner("Training sequence models — Hazard..."):
                 start = time.time()
                 model3, train_df, valid_df, test_df = seq.model3_hazard(train_df, valid_df, test_df)
+                st.session_state.step_times["Hazard"] = time.time() - start
+                train_done.append(("Hazard", ""))
+
+            _render_training_log("HMM")
+            with st.spinner("Training sequence models — HMM..."):
+                start = time.time()
                 model4, train_df, valid_df, test_df = seq.model4_hmm(train_df, valid_df, test_df)
+                st.session_state.step_times["HMM"] = time.time() - start
+                train_done.append(("HMM", ""))
+
+            _render_training_log("Sequence")
+            with st.spinner("Building sequence outputs..."):
+                start = time.time()
                 model5_outputs = seq.model5_lstm_and_transformer(train_df, valid_df, test_df)
                 st.session_state.step_times["Sequence"] = time.time() - start
+                train_done.append(("Sequence", ""))
 
-                st.session_state.model3 = model3
-                st.session_state.model4 = model4
-                st.session_state.model5_outputs = model5_outputs
-                st.session_state.train_df = train_df
-                st.session_state.valid_df = valid_df
-                st.session_state.test_df = test_df
+            st.session_state.model3 = model3
+            st.session_state.model4 = model4
+            st.session_state.model5_outputs = model5_outputs
+            st.session_state.train_df = train_df
+            st.session_state.valid_df = valid_df
+            st.session_state.test_df = test_df
 
     if run_cls or run_all:
         if st.session_state.train_df is None:
@@ -3628,8 +3905,8 @@ def page_model_training():
         else:
             from multiclass_model import MulticlassModel
             modeler = MulticlassModel()
-
-            with st.spinner("Training classifier..."):
+            _render_training_log("Classifier")
+            with st.spinner("Training classifier — this is the slowest step..."):
                 start = time.time()
                 result = modeler.model6_multiclass(st.session_state.train_df, st.session_state.valid_df, st.session_state.test_df)
                 st.session_state.step_times["Classifier"] = time.time() - start
@@ -3643,6 +3920,8 @@ def page_model_training():
                 st.session_state.test_pred_ch = tpch
                 st.session_state.feature_importance = fi
                 st.session_state.current_step = max(st.session_state.current_step, 5)
+                train_done.append(("Classifier", ""))
+            _render_training_log(None)
             st.rerun()
 
     if st.session_state.train_df is not None:
@@ -3661,6 +3940,24 @@ def page_model_training():
         test_pred = st.session_state.test_pred
         test_pred_ch = st.session_state.test_pred_ch
         le = st.session_state.model6_artifacts.label_encoder
+
+        acc = accuracy_score(y_test, test_pred)
+        mf1 = f1_score(y_test, test_pred, average="macro")
+        wf1 = f1_score(y_test, test_pred, average="weighted")
+        n_classes = len(le.classes_)
+        n_features = len(st.session_state.feature_cols) if st.session_state.feature_cols else 0
+        train_t = st.session_state.step_times.get("Classifier", 0)
+
+        st.markdown(f"""
+        <div class="stat-ticker">
+            <div class="ticker-item"><div class="tv">{acc:.3f}</div><div class="tl">Accuracy</div></div>
+            <div class="ticker-item"><div class="tv">{mf1:.3f}</div><div class="tl">Macro F1</div></div>
+            <div class="ticker-item"><div class="tv">{wf1:.3f}</div><div class="tl">Weighted F1</div></div>
+            <div class="ticker-item"><div class="tv">{n_classes}</div><div class="tl">Classes</div></div>
+            <div class="ticker-item"><div class="tv">{n_features}</div><div class="tl">Features</div></div>
+            <div class="ticker-item"><div class="tv">{train_t:.0f}s</div><div class="tl">Train Time</div></div>
+        </div>
+        """, unsafe_allow_html=True)
 
         render_section("Model Performance", "leaderboard")
         render_section_note("Use the report, confusion matrix, and feature importance views to compare rank order and class separation.")
@@ -4603,15 +4900,27 @@ def page_monitoring():
         ("Export", os.path.exists("best_model.pkl")),
     ]
 
-    render_section("Step Status", "check_circle")
+    render_section("Pipeline Status", "check_circle")
     render_section_note("These cards show which stages are ready and which ones still need to be run.")
 
-    cols = st.columns(8)
-    for i, (name, done) in enumerate(steps):
-        with cols[i]:
-            color = "green" if done else "red"
-            icon = "check_circle" if done else "pending"
-            render_kpi(icon, name, "Done" if done else "Pending", "", color)
+    grid_html = '<div class="pipeline-grid">'
+    step_icons_mon = ["storage","hub","functions","share","model_training","notifications","feedback","cloud_upload"]
+    for idx, (name, done) in enumerate(steps):
+        cls = "done" if done else "skip"
+        val = "✓ Done" if done else "Pending"
+        t = ""
+        # try to find timing
+        timing_key = name.replace(" ","")
+        matched_time = next((v for k, v in st.session_state.step_times.items() if name.lower() in k.lower()), None)
+        sub = f"{matched_time:.1f}s" if matched_time else "—"
+        grid_html += f"""
+        <div class="pipe-cell {cls}">
+            <div class="pc-name">{name}</div>
+            <div class="pc-value">{val}</div>
+            <div class="pc-sub">{sub}</div>
+        </div>"""
+    grid_html += "</div>"
+    st.markdown(grid_html, unsafe_allow_html=True)
 
     if st.session_state.step_times:
         render_section("Execution Timeline", "timeline")
